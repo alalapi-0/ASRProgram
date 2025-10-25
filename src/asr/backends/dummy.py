@@ -18,7 +18,7 @@ class DummyTranscriber(ITranscriber):
     """返回基于文件名生成的段级与词级占位结构。"""
 
     # 实现抽象方法 transcribe_file。
-    def transcribe_file(self, input_path: str, language: str) -> dict:
+    def transcribe_file(self, input_path: str) -> dict:
         """根据输入文件名构造模拟的转写结果。"""
         # 使用 Path 提取文件名主体部分。
         file_path = Path(input_path)
@@ -68,19 +68,29 @@ class DummyTranscriber(ITranscriber):
                 "words": word_items,
             }
         ]
-        # 构造顶层元数据，包含后端信息与时间戳。
+        # 构造顶层元数据，包含语言、时长与后端信息。
         metadata = {
-            "language": language,
+            "language": self.language,
             "duration_sec": 0.0,
             "backend": {
                 "name": DUMMY_NAME,
                 "version": DUMMY_VERSION,
+                "model": self.model_name or "synthetic",
             },
-            "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "meta": {
+                "note": "placeholder for round 3",
+                "generated_at": datetime.now(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+            },
         }
-        # 返回完整的转写结果，包括 metadata、segments 与 words。
+        # 返回符合统一接口的占位结果结构。
         return {
-            "metadata": metadata,
+            "language": metadata["language"],
+            "duration_sec": metadata["duration_sec"],
+            "backend": metadata["backend"],
             "segments": segments,
             "words": word_items,
+            "meta": metadata["meta"],
         }
+

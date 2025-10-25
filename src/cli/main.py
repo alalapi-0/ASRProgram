@@ -10,6 +10,9 @@ from src.asr.pipeline import run
 # 从日志工具导入获取日志器的函数。
 from src.utils.logging import get_logger
 
+# 定义允许选择的后端集合，便于参数校验。
+ALLOWED_BACKENDS = {"dummy", "faster-whisper"}
+
 # 定义布尔参数解析器，将字符串转换为布尔值。
 def parse_bool(value: str) -> bool:
     """将字符串形式的 true/false 转换为布尔类型。"""
@@ -32,7 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     """创建并返回参数解析器实例。"""
     # 初始化解析器并提供描述信息。
     parser = argparse.ArgumentParser(
-        description="ASRProgram Round 1 dummy transcription pipeline"
+        description="ASRProgram Round 3 placeholder transcription pipeline"
     )
     # 添加 input 参数，指向单个文件或目录。
     parser.add_argument(
@@ -46,11 +49,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="out",
         help="输出 JSON 文件目录，默认 out",
     )
-    # 添加 backend 参数，本轮默认 dummy。
+    # 添加 backend 参数，供用户选择具体后端。
     parser.add_argument(
         "--backend",
         default="dummy",
-        help="选择转写后端，当前仅支持 dummy",
+        help="选择转写后端，当前支持 dummy 与 faster-whisper",
     )
     # 添加语言参数，用于写入元数据。
     parser.add_argument(
@@ -103,11 +106,24 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     # 解析命令行参数。
     args = parser.parse_args(argv)
+    # 校验 backend 参数是否在允许列表中。
+    if args.backend not in ALLOWED_BACKENDS:
+        parser.error(
+            f"Unsupported backend '{args.backend}'. Choose from: {', '.join(sorted(ALLOWED_BACKENDS))}"
+        )
     # 将输出目录与输入路径转换为 Path 对象。
     input_path = Path(args.input)
     out_dir = Path(args.out_dir)
     # 初始化日志器以便 CLI 也能输出信息。
     logger = get_logger(args.verbose)
+    # 在 verbose 模式下打印后端选择及语言信息，辅助调试。
+    if args.verbose:
+        logger.debug(
+            "Selected backend=%s language=%s extra_options=%s",
+            args.backend,
+            args.language,
+            {},
+        )
     # 记录即将启动管线的信息。
     logger.info("Starting pipeline with backend %s", args.backend)
     # 调用管线并获取结果摘要。
@@ -140,3 +156,4 @@ def main(argv: list[str] | None = None) -> int:
 if __name__ == "__main__":
     # 执行 main 并使用返回值作为进程退出码。
     sys.exit(main())
+

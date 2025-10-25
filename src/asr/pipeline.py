@@ -4,11 +4,11 @@ from pathlib import Path
 # 导入 typing 模块以提供类型注释。
 from typing import Dict, List
 # 导入后端注册表工厂函数。
-from .backends import create_backend
+from .backends import create_transcriber
 # 导入音频工具以获取占位时长。
 from src.utils.audio import probe_duration
 # 导入 IO 工具以执行原子写入。
-from src.utils.io import ensure_directory, write_json_atomic
+from src.utils.io import ensure_directory, write_json_atomic, atomic_write_text
 # 导入日志工具以输出调试信息。
 from src.utils.logging import get_logger
 
@@ -63,8 +63,8 @@ def run(
         num_workers,
         dry_run,
     )
-    # 创建后端实例以处理音频。
-    backend = create_backend(backend_name)
+    # 创建后端实例以处理音频，透传语言参数供元数据记录。
+    backend = create_transcriber(backend_name, language=language)
     # 收集输入文件列表。
     input_files = collect_input_files(input_path)
     # 如果未找到任何文件，记录信息并返回空结果。
@@ -87,6 +87,7 @@ def run(
         # 构造词级与段级输出文件路径。
         words_path = out_dir / f"{basename}.words.json"
         segments_path = out_dir / f"{basename}.segments.json"
+        error_path = out_dir / f"{basename}.error.txt"
         # 处理 dry-run 情况：仅打印计划，不调用后端和写文件。
         if dry_run:
             # 记录 dry-run 提示信息。
@@ -106,21 +107,30 @@ def run(
             # 继续处理下一个文件。
             continue
         try:
-            # 调用后端执行转写。
-            transcription = backend.transcribe_file(str(audio_file), language)
-            # 获取词级与段级数据以便写入。
+            # 调用后端执行转写，获取标准化结构。
+            transcription = backend.transcribe_file(str(audio_file))
+            # 计算占位时长，后续轮次可替换为真实探测值。
+            duration = probe_duration(str(audio_file))
+            # 构造词级数据，保留语言、后端与元信息。
             words_data = {
-                "metadata": transcription["metadata"],
-                "words": transcription["words"],
+                "language": transcription.get("language", language),
+                "duration_sec": duration,
+                "backend": transcription.get("backend", {}),
+                "meta": transcription.get("meta", {}),
+                "words": transcription.get("words", []),
             }
-            # 若需要输出段级文件，则准备段级数据。
+            # 如需输出段级数据，则准备对应结构。
             if write_segments:
                 segments_data = {
-                    "metadata": transcription["metadata"],
-                    "segments": transcription["segments"],
+                    "language": transcription.get("language", language),
+                    "duration_sec": duration,
+                    "backend": transcription.get("backend", {}),
+                    "meta": transcription.get("meta", {}),
+                    "segments": transcription.get("segments", []),
                 }
-            # 更新元数据中的 duration 字段，使用占位探测结果。
-            words_data["metadata"]["duration_sec"] = probe_duration(str(audio_file))
+            # 清理潜在的旧错误文件，避免误判为失败。
+            if error_path.exists():
+                error_path.unlink()
             # 将词级 JSON 写入磁盘。
             write_json_atomic(words_path, words_data)
             # 如需写段级文件，执行写入操作。
@@ -131,7 +141,10 @@ def run(
         except Exception as exc:  # noqa: BLE001
             # 捕获异常并记录错误。
             logger.error("Failed to process %s: %s", audio_file, exc)
+            # 将错误信息写入单独的文本文件以便排查。
+            atomic_write_text(error_path, f"{exc}\n")
             # 将错误信息加入结果。
             result["errors"].append({"path": str(audio_file), "error": str(exc)})
     # 返回最终的结果摘要。
     return result
+
