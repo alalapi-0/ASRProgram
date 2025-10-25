@@ -3,6 +3,8 @@
 import argparse
 # 导入 sys 以在脚本作为模块运行时返回退出码。 
 import sys
+# 导入 Path 以在默认 manifest 路径中复用。 
+from pathlib import Path
 # 从管线模块导入 run 函数执行核心逻辑。 
 from src.asr.pipeline import run
 # 导入日志工具以统一输出格式与打印汇总。 
@@ -14,125 +16,127 @@ ALLOWED_BACKENDS = {"dummy", "faster-whisper"}
 # 定义布尔参数解析函数，支持 true/false 字符串。 
 def parse_bool(value: str) -> bool:
     """将传入值解析为布尔类型，仅接受 true/false。"""  # 函数说明。
-    # 如果调用方已经传入布尔值（例如默认值），直接返回。 
-    if isinstance(value, bool):
+    if isinstance(value, bool):  # 若已是布尔值则直接返回。
         return value
-    # 将输入字符串统一转为小写，避免大小写影响判断。 
-    normalized = value.lower()
-    # 匹配字符串 true。 
-    if normalized == "true":
+    normalized = value.lower()  # 统一转换为小写。
+    if normalized == "true":  # 匹配 true。
         return True
-    # 匹配字符串 false。 
-    if normalized == "false":
+    if normalized == "false":  # 匹配 false。
         return False
-    # 其他取值均视为非法，交给 argparse 抛出错误。 
-    raise argparse.ArgumentTypeError("Expected 'true' or 'false'")
+    raise argparse.ArgumentTypeError("Expected 'true' or 'false'")  # 其他值抛出错误。
 
-# 构建命令行解析器，保持与前几轮参数兼容。 
+# 构建命令行解析器，保持与前几轮参数兼容并新增 Round11 选项。 
 def build_parser() -> argparse.ArgumentParser:
     """创建参数解析器并声明所有可用选项。"""  # 函数说明。
-    # 初始化解析器对象并提供描述信息。 
     parser = argparse.ArgumentParser(
-        description="ASRProgram Round 9 concurrent transcription pipeline"
+        description="ASRProgram Round 11 transcription pipeline",
     )
-    # 添加输入路径参数，支持文件或目录。 
     parser.add_argument("--input", required=True, help="输入音频文件或目录")
-    # 添加输出目录参数，默认值为 out。 
     parser.add_argument("--out-dir", default="out", help="输出 JSON 所在目录")
-    # 添加后端选择参数。 
     parser.add_argument(
         "--backend",
         default="dummy",
         help="指定转写后端（dummy 或 faster-whisper，占位实现）",
     )
-    # 添加语言参数，用于写入 JSON 元信息。 
     parser.add_argument("--language", default="auto", help="指定语言占位信息")
-    # 控制是否生成 segments.json。 
     parser.add_argument(
         "--segments-json",
         type=parse_bool,
         default="true",
         help="是否输出 <name>.segments.json (true/false)",
     )
-    # 控制是否覆盖已有结果。 
     parser.add_argument(
         "--overwrite",
         type=parse_bool,
         default="false",
         help="是否覆盖已存在的输出 (true/false)",
     )
-    # dry-run 模式仅打印计划。 
     parser.add_argument(
         "--dry-run",
         type=parse_bool,
         default="false",
         help="只打印计划，不创建目录或文件 (true/false)",
     )
-    # verbose 模式输出更详细的日志。 
     parser.add_argument(
         "--verbose",
         type=parse_bool,
         default="false",
         help="输出详细日志 (true/false)",
     )
-    # 并发线程数量，默认 1。 
     parser.add_argument(
         "--num-workers",
         type=int,
         default=1,
         help="并发 worker 数量 (1-8 建议)",
     )
-    # 最大重试次数，默认 1。 
     parser.add_argument(
         "--max-retries",
         type=int,
         default=1,
         help="单文件失败后的最大重试次数",
     )
-    # 任务启动速率限制，单位任务/秒，0 表示不限速。 
     parser.add_argument(
         "--rate-limit",
         type=float,
         default=0.0,
         help="任务启动速率 (任务/秒，0 表示不限)",
     )
-    # 是否跳过已完成文件，默认 true。 
     parser.add_argument(
         "--skip-done",
         type=parse_bool,
         default="true",
         help="是否跳过已完成文件 (true/false)",
     )
-    # fail-fast 选项，在首个失败后停止提交新任务。 
     parser.add_argument(
         "--fail-fast",
         type=parse_bool,
         default="false",
         help="出现失败时是否立即停止提交剩余任务 (true/false)",
     )
-    # 返回配置好的解析器。 
+    parser.add_argument(
+        "--integrity-check",
+        type=parse_bool,
+        default="true",
+        help="是否计算并比对输入文件 SHA-256 (true/false)",
+    )
+    parser.add_argument(
+        "--lock-timeout",
+        type=float,
+        default=30.0,
+        help="获取文件锁的超时时间（秒）",
+    )
+    parser.add_argument(
+        "--cleanup-temp",
+        type=parse_bool,
+        default="true",
+        help="是否清理历史 .tmp/.partial/.lock 残留 (true/false)",
+    )
+    parser.add_argument(
+        "--manifest-path",
+        default=None,
+        help="自定义 Manifest JSONL 路径，默认写入输出目录 _manifest.jsonl",
+    )
+    parser.add_argument(
+        "--force",
+        type=parse_bool,
+        default="false",
+        help="忽略已有产物强制重跑 (true/false)",
+    )
     return parser
 
 # 定义主函数作为命令行程序入口。 
 def main(argv: list[str] | None = None) -> int:
     """解析参数并调用管线，返回退出状态码。"""  # 函数说明。
-    # 构建解析器并解析命令行参数。 
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    # 校验后端名称是否在允许集合中，非法时通过 parser.error 退出。 
-    if args.backend not in ALLOWED_BACKENDS:
+    parser = build_parser()  # 构建解析器。
+    args = parser.parse_args(argv)  # 解析命令行参数。
+    if args.backend not in ALLOWED_BACKENDS:  # 校验后端名称是否支持。
         parser.error(
             f"Unsupported backend '{args.backend}'. Choose from: {', '.join(sorted(ALLOWED_BACKENDS))}"
         )
-    # 初始化日志器，日志级别由 verbose 控制。 
-    logger = get_logger(args.verbose)
-    # 在详细模式下打印解析到的参数摘要，便于追踪执行配置。 
-    if args.verbose:
-        logger.debug(
-            "CLI parsed arguments: %s",
-            args,
-        )
-    # 尝试执行管线并捕获致命异常，确保 CLI 返回非零退出码。 
+    logger = get_logger(args.verbose)  # 初始化日志器。
+    if args.verbose:  # 在详细模式下打印解析参数供调试。
+        logger.debug("CLI parsed arguments: %s", args)
+    manifest_path = args.manifest_path or str(Path(args.out_dir) / "_manifest.jsonl")
     try:
         summary = run(
             input_path=args.input,
@@ -148,20 +152,29 @@ def main(argv: list[str] | None = None) -> int:
             rate_limit=max(0.0, args.rate_limit),
             skip_done=args.skip_done,
             fail_fast=args.fail_fast,
+            integrity_check=args.integrity_check,
+            lock_timeout=max(0.0, args.lock_timeout),
+            cleanup_temp=args.cleanup_temp,
+            manifest_path=manifest_path,
+            force=args.force,
         )
     except Exception as exc:  # noqa: BLE001
-        # 记录致命错误并在详细模式下打印堆栈。 
         logger.error("Fatal pipeline error: %s", exc)
         if args.verbose:
             logger.exception("Stack trace for fatal pipeline error")
-        # 返回非零退出码以指示执行失败。 
         return 1
-    # 利用统一的 summary 打印函数输出结果。 
-    print_summary(summary, logger=logger)
-    # 根据需求，无论是否存在错误文件，只要处理完成即返回 0。 
+    print_summary(summary, logger=logger)  # 输出标准汇总。
+    manifest_location = summary.get("manifest_path", manifest_path)
+    if manifest_location:
+        logger.info("Manifest updated at %s", manifest_location)
+    stale_skips = summary.get("skipped_stale", 0)
+    if stale_skips:
+        logger.info("Stale results skipped: %d (rerun with --overwrite true to rebuild)", stale_skips)
+    lock_conflicts = summary.get("lock_conflicts", 0)
+    if lock_conflicts:
+        logger.info("Lock conflicts encountered: %d (consider adjusting --lock-timeout)", lock_conflicts)
     return 0
 
 # 允许通过 python -m 调用模块。 
 if __name__ == "__main__":
-    # 将 main 的返回值作为进程退出码。 
     sys.exit(main())
