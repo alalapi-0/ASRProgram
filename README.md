@@ -223,6 +223,122 @@ pwsh -File scripts/setup.ps1 -check-only false -use-system-ffmpeg true -cache-di
 ### 下一步
 Round 7/8 将让 faster-whisper 产生真实的转写结果，并在 JSON 输出中填充词级时间戳；Round 10 会补充 whisper.cpp 的 GGML/GGUF 模型下载与哈希校验。
 
+## Round 7：启用 faster-whisper 真实段级推理
+在完成 Round 6 的模型下载后，本轮正式启用 faster-whisper 的真实推理能力。管线会调用 `ffprobe` 探测音频时长、加载缓存中的 CTranslate2 模型并生成段级 `segments.json`。词级时间戳将在下一轮补齐，因此 `words.json` 中的 `words` 数组暂时为空，但依旧包含 schema、语言、后端元信息等结构，便于后续无缝衔接。
+
+### 从模型到识别的最小流程
+1. **准备环境与模型**（若尚未执行 Round 6 步骤）：
+   ```bash
+   # 安装依赖并下载模型（以 medium 为例）
+   bash scripts/setup.sh --check-only false --use-system-ffmpeg true --cache-dir .cache
+   python scripts/download_model.py --backend faster-whisper --model medium --models-dir ~/.cache/asrprogram/models
+   ```
+2. **运行环境体检**：
+   ```bash
+   python scripts/verify_env.py --backend faster-whisper --model medium
+   ```
+   输出中会新增 faster-whisper 版本信息，以及模型是否能够被轻量加载的检测项。
+3. **执行真实段级识别**：
+   ```bash
+   python -m src.cli.main \
+     --input ./samples \
+     --backend faster-whisper \
+     --language ja \
+     --segments-json true \
+     --verbose true
+   ```
+
+### 输出样例
+`out/sample.segments.json` 的片段如下（`words` 暂为空数组）：
+
+```json
+{
+  "schema": "asrprogram.segmentset.v1",
+  "language": "ja",
+  "duration_sec": 12.34,
+  "backend": {
+    "name": "faster-whisper",
+    "version": "1.0.3",
+    "model": "/home/user/.cache/asrprogram/models/faster-whisper/medium",
+    "device": "cpu",
+    "compute_type": "int8_float16"
+  },
+  "meta": {
+    "decode_options": {
+      "beam_size": 5,
+      "temperature": 0.0,
+      "vad_filter": false,
+      "chunk_length_s": null,
+      "best_of": null,
+      "patience": null
+    },
+    "detected_language": "ja",
+    "duration_from_probe": 12.34,
+    "duration_source": "ffprobe",
+    "schema_version": "round7"
+  },
+  "segments": [
+    {
+      "id": 0,
+      "text": "これはサンプル音声です。",
+      "start": 0.0,
+      "end": 4.2,
+      "avg_conf": null,
+      "words": []
+    }
+  ]
+}
+```
+
+对应的 `words.json` 会包含相同的 `backend`/`meta` 信息，仅 `words` 数组为空，为 Round 8 的逐词输出预留结构。
+
+### 常用参数与调优建议
+- `--model`：可选择 `tiny`/`base`/`small`/`medium`/`large-v3`，模型越大准确率越高、资源占用越大。
+- `--compute-type`：
+  - `int8_float16`：推荐在大多数 CPU/GPU 上使用，显著降低内存占用。
+  - `int8`：适合 Windows CPU 或内存紧张的环境。
+  - `float16`：Apple Silicon / GPU 环境速度较快。
+  - `float32`：最稳妥但占用最大，仅在调试时使用。
+- `--device`：`auto` 会优先选择 GPU，若需强制 CPU 可指定 `--device cpu`。
+- `--beam-size`：减小到 1 可以大幅提速，代价是准确率下降。
+- `--temperature`：保持 0.0 等价于纯 beam search，增大可提高多样性但速度略慢。
+- `--vad-filter`：Round 7 仅记录该参数，实际 VAD 逻辑会在 Round 8/9 进一步增强。
+
+以上参数既可通过 CLI 传递，也可在 `config/default.yaml` 的 `runtime` 区域设置默认值：
+
+```yaml
+runtime:
+  backend: faster-whisper
+  compute_type: int8_float16
+  device: auto
+  beam_size: 5
+  temperature: 0.0
+  vad_filter: false
+  chunk_length_s: null
+```
+
+### 常见错误与排查
+- **模型路径不存在或缺少文件**：重新执行 `scripts/download_model.py --backend faster-whisper --model <name>`；若使用自定义路径，请确认 CLI 与配置文件保持一致。
+- **`ffprobe` 不可用**：
+  - 运行 `scripts/setup.sh --use-system-ffmpeg false` 下载静态构建。
+  - 或使用系统包管理器安装：`sudo apt install ffmpeg`、`brew install ffmpeg`、`winget install ffmpeg` 等。
+- **内存不足/加载失败**：
+  - 改用更小模型（如 `small` 或 `base`）。
+  - 设置 `--compute-type int8` 并降低 `--beam-size`。
+- **CPU 推理过慢**：
+  - 将 `--beam-size` 调为 1，并保持 `--temperature 0`。
+  - 在拥有 GPU 的环境安装 `torch` 以启用 GPU 路径。
+- **`verify_env.py` 模型加载测试失败**：检查模型目录是否完整，或尝试删除后重新下载；若错误指向显卡/驱动，请切换为 `--device cpu` 并重新运行。
+
+### 手动烟雾测试（推荐）
+1. 准备 5~15 秒的短音频（可使用手机录制语音）。
+2. 运行：
+   ```bash
+   python -m src.cli.main --input /path/to/audio.wav --backend faster-whisper --out-dir ./out --verbose true
+   ```
+3. 检查 `out/<name>.segments.json`：确认 `segments` 非空、时长与实际音频接近；`words.json` 应含有空数组但结构完整。
+4. 若生成 `.error.txt`，打开文件查看提示并按上文排查。
+
 ## 后端架构与 Round 3 说明
 Round 3 引入统一接口 `ITranscriber`，所有后端在构造时接受 `model`、`language` 与任意扩展参数，并实现 `transcribe_file` 方法返
 回标准化的段级结构。`src/asr/backends/__init__.py` 维护了名称到实现的注册表，并提供 `create_transcriber` 工厂函数，未来新增的
@@ -230,8 +346,7 @@ Round 3 引入统一接口 `ITranscriber`，所有后端在构造时接受 `mode
 
 当前注册的后端：
 - **dummy**：沿用之前的占位实现，根据文件名生成词级与段级伪数据。
-- **faster-whisper**：全新占位实现，不导入真实库，仅校验输入路径与扩展名，返回单段结果，`words` 暂为空数组，并在元信息中说明
-  Round 7/8 才会启用真实推理与词级时间戳。
+- **faster-whisper**：Round 7 起启用真实 CTranslate2 推理，生成段级结果并记录解码参数；`words` 数组暂为空，Round 8 将补齐词级时间戳。
 
 管线 `src/asr/pipeline.py` 通过工厂创建后端，逐文件调用 `transcribe_file` 并落盘：
 - `<name>.segments.json`：包含语言、占位时长、后端信息、meta 扩展与段级数组。

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3  # 指定解释器为 Python 3，方便跨平台执行。
-"""逐行注释的环境体检脚本，Round 6 增强模型缓存检测。"""  # 描述脚本用途。
+"""逐行注释的环境体检脚本，Round 7 增强 faster-whisper 检测。"""  # 描述脚本用途。
 import argparse  # 解析命令行参数。
 import platform  # 获取平台与 Python 版本信息。
 import subprocess  # 调用外部命令读取工具版本。
@@ -18,7 +18,7 @@ REQUIRED_PACKAGES = [  # 定义必须存在的 Python 包。
     ("requests", "requests"),  # HTTP 请求库。
 ]  # 必需包列表结束。
 OPTIONAL_PACKAGES = [  # 可选包列表。
-    ("torch", "torch"),  # 后续真实推理可能用到 torch。
+    ("torch", "torch"),  # faster-whisper 可结合 torch 使用 GPU。
 ]  # 可选包列表结束。
 FASTER_WHISPER_FILES = ["config.json", "model.bin", "tokenizer.json", "vocabulary.json"]  # faster-whisper 所需文件名。
 FASTER_WHISPER_SIZE_HINT = {  # 不同规格模型的预估总大小（字节）。
@@ -50,7 +50,7 @@ def load_defaults() -> Dict[str, object]:
 
 def build_parser(defaults: Dict[str, object]) -> argparse.ArgumentParser:
     """创建命令行解析器以支持自定义模型参数。"""  # 函数说明。
-    parser = argparse.ArgumentParser(description="检查依赖与模型缓存状态。")  # 创建解析器并设置描述。
+    parser = argparse.ArgumentParser(description="检查依赖、模型缓存与 faster-whisper 可用性。")  # 创建解析器并设置描述。
     backend_default = defaults.get("backend", {}).get("default", "faster-whisper")  # 读取后端默认值。
     model_default = defaults.get("model", {}).get("default", "medium")  # 读取模型默认值。
     cache_default = defaults.get("cache_dir", ".cache/")  # 读取缓存目录默认值。
@@ -142,7 +142,7 @@ def evaluate_directory(path: Path) -> Tuple[str, str]:
 
 def check_model_status(backend: str, model: str, models_dir: Path) -> Tuple[str, Path, int, List[str]]:
     """检查指定后端模型是否就绪，返回状态字符串、路径、大小和缺失文件列表。"""  # 函数说明。
-    backend_lower = backend.lower()  # 统一使用小写目录名。
+    backend_lower = backend.lower()  # 统一用小写目录名。
     target_dir = models_dir / backend_lower / model  # 计算模型目录。
     missing: List[str] = []  # 初始化缺失文件列表。
     total_size = 0  # 初始化总体积。
@@ -175,6 +175,30 @@ def format_bytes(size: int) -> str:
     return f"{value:.2f}TB"  # 理论上不会达到此行。
 
 
+def import_faster_whisper() -> Tuple[Optional[object], Optional[str]]:
+    """尝试导入 faster_whisper 并返回模块与版本。"""  # 函数说明。
+    try:  # 捕获导入异常。
+        import faster_whisper  # type: ignore  # 导入模块。
+    except Exception:  # 导入失败时。
+        return None, None  # 返回空值。
+    version = getattr(faster_whisper, "__version__", "未知版本")  # 读取版本。
+    return faster_whisper, str(version)  # 返回模块对象与版本字符串。
+
+
+def try_lightweight_model_load(module: object, model_path: Path) -> Tuple[bool, str]:
+    """若模型存在则尝试快速构造 WhisperModel，用于验证可加载性。"""  # 函数说明。
+    try:  # 捕获潜在加载异常。
+        WhisperModel = getattr(module, "WhisperModel")  # 从模块获取 WhisperModel 类。
+    except AttributeError:  # 模块不含 WhisperModel。
+        return False, "faster_whisper 缺少 WhisperModel 类"  # 返回失败信息。
+    try:  # 尝试实例化模型。
+        model = WhisperModel(str(model_path), device="auto", compute_type="auto")  # 轻量加载模型。
+        del model  # 立即释放对象，避免占用显存或内存。
+    except Exception as exc:  # noqa: BLE001
+        return False, f"WARNING: 模型加载失败 -> {exc}"  # 返回失败原因。
+    return True, "OK: 模型加载测试通过"  # 返回成功信息。
+
+
 def main() -> None:
     """脚本主入口，输出完整体检报告。"""  # 函数说明。
     defaults = load_defaults()  # 读取默认配置。
@@ -182,7 +206,7 @@ def main() -> None:
     args = parser.parse_args()  # 解析命令行参数。
     models_dir = Path(args.models_dir).expanduser().resolve()  # 解析模型目录。
     cache_dir = Path(args.cache_dir).expanduser().resolve()  # 解析缓存目录。
-    print("ASRProgram 环境体检报告（Round 6）")  # 打印标题。
+    print("ASRProgram 环境体检报告（Round 7）")  # 打印标题。
     print_kv("Python 解释器", sys.executable)  # 输出解释器路径。
     print_kv("Python 版本", platform.python_version())  # 输出 Python 版本。
     py_status, py_advice = evaluate_python_version()  # 获取 Python 状态。
@@ -196,6 +220,12 @@ def main() -> None:
     optional_reports = evaluate_packages(OPTIONAL_PACKAGES)  # 检查可选包。
     for report in optional_reports:  # 遍历结果。
         print(report)  # 输出每项。
+    module, fw_version = import_faster_whisper()  # 试图导入 faster-whisper。
+    print_section("faster-whisper 状态")  # 打印 faster-whisper 信息标题。
+    if module is None:  # 导入失败时。
+        print("WARNING: 无法导入 faster-whisper，请运行 scripts/setup.sh")  # 提示安装依赖。
+    else:  # 导入成功时。
+        print_kv("faster-whisper 版本", fw_version or "未知")  # 输出版本。
     print_section("多媒体工具版本")  # 打印工具检测标题。
     print_kv("ffmpeg", check_tool_version("ffmpeg"))  # 输出 ffmpeg 版本。
     print_kv("ffprobe", check_tool_version("ffprobe"))  # 输出 ffprobe 版本。
@@ -218,6 +248,11 @@ def main() -> None:
     if model_status == "READY":  # 模型就绪时。
         print_kv("MODEL STATUS", "READY")  # 输出就绪状态。
         print_kv("SIZE", format_bytes(model_size))  # 输出模型大小。
+        if module is not None:  # 若 faster-whisper 可导入。
+            ok, message = try_lightweight_model_load(module, model_path)  # 进行轻量加载测试。
+            print(message)  # 输出加载结果。
+        else:  # 模块缺失无法测试。
+            print("WARNING: faster-whisper 未安装，跳过模型加载测试。")  # 输出警告。
     elif model_status == "UNKNOWN BACKEND":  # 未知后端时。
         print_kv("MODEL STATUS", "UNKNOWN")  # 输出未知状态。
         print("WARNING: verify_env.py 暂未内置该后端的完整校验逻辑。")  # 打印警告。

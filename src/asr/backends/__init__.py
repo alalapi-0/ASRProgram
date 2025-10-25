@@ -1,9 +1,9 @@
 """后端注册表，用于根据名称返回具体实现。"""
 # 导入 typing.TYPE_CHECKING 用于仅在类型检查时导入接口。
 from typing import TYPE_CHECKING, Dict, Type
-# 导入占位 dummy 后端以注册。
+# 导入 dummy 后端以注册。
 from .dummy import DummyTranscriber
-# 导入 faster-whisper 占位后端以注册。
+# 导入 faster-whisper 后端以注册。
 from .faster_whisper_backend import FasterWhisperTranscriber
 # 如果处于类型检查阶段，导入接口定义以提供准确提示。
 if TYPE_CHECKING:
@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 BACKENDS: Dict[str, Type["ITranscriber"]] = {
     # dummy 名称对应 DummyTranscriber 类。
     "dummy": DummyTranscriber,
-    # faster-whisper 名称对应占位实现。
+    # faster-whisper 名称对应真实的 faster-whisper 实现。
     "faster-whisper": FasterWhisperTranscriber,
 }
 
