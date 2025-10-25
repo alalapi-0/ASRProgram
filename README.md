@@ -650,3 +650,83 @@ python -m src.cli.main --input ./samples --overwrite true
 - `--dry-run true`：不创建输出目录、不落盘任何文件，只打印计划动作；`Summary` 中依旧会统计 `succeeded`，以便上层调度系统了解处理总量。
 - `--verbose true`：打印扫描到的文件列表、目标输出路径、覆盖/跳过决策以及最终汇总详情，便于问题排查。
 
+
+## Round 10：whisper.cpp 后端
+whisper.cpp 提供高度可移植的 CPU 推理实现，适合以下场景：
+* **资源受限**：在没有 GPU、内存有限或仅能使用老旧 CPU 的环境中，whisper.cpp 的量化模型（GGML/GGUF）能显著降低内存占用。
+* **跨平台部署**：需要在 Windows/Mac/Linux 甚至 ARM 设备上分发独立可执行文件时，whisper.cpp 的单一二进制更易集成。
+* **无外部依赖**：构建/下载后即可离线运行，适合内网或无法访问 Python 包镜像的场景。
+
+### 安装方式
+1. **一键脚本（推荐）**
+   ```bash
+   # Bash / zsh（macOS、Linux）
+   bash scripts/setup.sh --with-whispercpp true --model medium
+
+   # PowerShell / pwsh（Windows、跨平台）
+   pwsh -File scripts/setup.ps1 -with-whispercpp true -model medium
+   ```
+   * `--with-whispercpp true` 会在 `.cache/whispercpp/` 下优先尝试下载预编译二进制，若失败自动回退到源码构建（需 `git`、`cmake` 与编译器）。
+   * 成功后脚本会把可执行文件存放于 `<cache-dir>/whispercpp/bin/`，并将路径透传给 `scripts/verify_env.py` 进行体检。
+   * `--model` 仍决定 faster-whisper 与 whisper.cpp 共用的模型规格；GGUF/GGML 会下载到 `<models-dir>/whisper.cpp/<model>/`。
+
+2. **手动安装（备用）**
+   ```bash
+   git clone https://github.com/ggerganov/whisper.cpp.git
+   cd whisper.cpp
+   cmake -B build -DCMAKE_BUILD_TYPE=Release
+   cmake --build build --config Release
+   ./build/bin/main --help
+   ```
+   * 将生成的 `main`/`main.exe` 放入任意可写目录，并在 `config/default.yaml` 的 `runtime.whisper_cpp.executable_path` 中填写绝对路径。
+   * 若需要自定义编译选项或交叉编译，请参考 whisper.cpp 官方 README。
+
+### 模型准备
+* **GGML vs GGUF**：GGML 为传统格式，GGUF 为新一代量化格式，两者都可被 whisper.cpp 加载；`scripts/download_model.py` 已预置常见映射，也可通过 `--model-url` 指定自定义权重。
+* **存放位置**：推荐使用默认目录 `~/.cache/asrprogram/models/whisper.cpp/<model>/`，下载脚本会返回实际文件路径，安装脚本在成功后会打印总结。
+* **大小建议**：若模型体积远小于以下值，通常意味着下载不完整（或选择了更高量化等级）：
+  | 规格 | 参考大小 |
+  | --- | --- |
+  | tiny | ~75 MB |
+  | base | ~145 MB |
+  | small | ~480 MB |
+  | medium | ~1.5 GB |
+  | large-v3 | ~3.05 GB |
+
+### 运行示例
+```bash
+# 启用 whisper.cpp 后端，自动生成词级时间戳与段级 JSON
+python -m src.cli.main \
+  --input ./samples \
+  --backend whisper.cpp \
+  --language ja \
+  --segments-json true \
+  --verbose
+```
+运行前请确保 `config/default.yaml`（或 CLI 参数）中已经填写 `runtime.whisper_cpp.executable_path` 与 `runtime.whisper_cpp.model_path`。
+
+### 关键参数
+以下参数既可在 `config/default.yaml` 中配置，也可通过 CLI（若后续轮次开放）覆盖：
+* `threads`：CPU 线程数，设为物理核心数可提升吞吐；设为 0 由 whisper.cpp 自动决定。
+* `beam_size`：解码候选宽度，1~3 更快但准确率略降；5 为兼容默认值。
+* `temperature`：温度采样参数，建议保持 0.0 以复现 deterministic 行为。
+* `max_len`：输出最大 token 数（整数），可防止异常长段。
+* `prompt`：初始提示文本，适合热词或延续上下文。
+* `print_progress`：是否输出进度条；在批量任务或日志敏感环境建议保持 `false`。
+* `timeout_sec`：子进程执行超时（秒），设置后可在异常卡死时自动终止。
+
+### 常见问题排查
+* **找不到可执行文件**：
+  - 确认安装脚本输出的路径是否存在；若自行下载，请执行 `chmod +x /path/to/main` 并在配置中写入绝对路径。
+  - Windows 用户请避免路径中包含中文或空格，必要时将可执行文件放在 `C:\whispercpp\bin\` 等简短目录。
+* **模型未检测到**：
+  - 运行 `python scripts/verify_env.py --whispercpp-model /path/to/model.gguf` 查看报告；若提示体积不足，请重新下载或检查是否为量化版本。
+  - 若使用私有仓库或需要鉴权的 GGUF 链接，可在 `download_model.py` 中通过 `--model-url` 指定完整 URL。
+* **解析失败**：
+  - 某些旧版本不支持 `--output-json`，安装脚本会自动回退到 TSV 解析；若出现格式差异，请更新至最新稳定版本或在命令中追加 `--output-json`。
+* **缺失词置信度**：
+  - 少数构建不会输出 `prob` 字段，解析逻辑会将词级置信度设为 `None`，并按段内平均置信度估算；需要精确置信度时建议升级可执行文件。
+* **性能调优**：
+  - 将 `threads` 设为物理核心数、`beam_size` 设为 1~3 可显著降低延迟。
+  - 关闭 `print_progress` 以减少 IO 开销；批量任务可结合 Round 9 的 `--num-workers` 并发能力。
+

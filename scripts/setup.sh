@@ -18,6 +18,12 @@ EXTRA_INDEX_URL=""  # 允许用户自定义 pip 镜像。
 REQUIREMENTS_FILE="${REPO_ROOT}/requirements.txt"  # 指定依赖清单文件。
 FFMPEG_CACHE_ROOT=""  # 预留变量用于记录 ffmpeg 下载目录。
 RESOLVED_PYTHON=""  # 记录解析出的 Python，可供其他函数复用。
+WITH_WHISPERCPP="false"  # 默认不安装 whisper.cpp，可通过参数开启。
+WHISPERCPP_METHOD="auto"  # whisper.cpp 安装方式，auto 会先尝试预编译再回退源码构建。
+WHISPERCPP_DIR=""  # whisper.cpp 缓存与安装目录，后续根据 cache-dir 推导。
+WHISPERCPP_EXE=""  # 用户已存在的 whisper.cpp 可执行文件路径。
+WHISPERCPP_RESOLVED_EXE=""  # 实际使用的 whisper.cpp 可执行文件路径。
+WHISPERCPP_MODEL_PATH=""  # 下载后的 whisper.cpp 模型文件路径，供 verify 使用。
 print_help() {  # 定义帮助函数输出脚本参数说明。
   cat <<'USAGE'  # 使用 here-doc 打印多行帮助信息。
 用法：bash scripts/setup.sh [参数]
@@ -29,6 +35,10 @@ print_help() {  # 定义帮助函数输出脚本参数说明。
   --backend NAME                 指定模型下载后端，默认 faster-whisper。
   --model NAME                   指定模型规格，默认 medium。
   --models-dir PATH              指定模型缓存目录，默认 ~/.cache/asrprogram/models。
+  --with-whispercpp true|false   是否额外安装 whisper.cpp 可执行文件（默认 false）。
+  --whispercpp-method MODE       指定安装方式 auto|build|prebuilt（默认 auto）。
+  --whispercpp-dir PATH          whisper.cpp 的缓存目录（默认 <cache-dir>/whispercpp）。
+  --whispercpp-exe PATH          已存在的 whisper.cpp 可执行文件路径（若提供则跳过安装）。
   --extra-index-url URL          为 pip 安装追加额外的索引源。
   --help                         查看帮助信息并退出。
 USAGE
@@ -67,6 +77,22 @@ while [[ $# -gt 0 ]]; do  # 开始解析命令行参数。
       MODELS_DIR="$2"  # 更新模型缓存目录。
       shift 2  # 跳过该参数及其值。
       ;;
+    --with-whispercpp)  # 捕获 --with-whispercpp 参数。
+      WITH_WHISPERCPP="$2"  # 记录是否安装 whisper.cpp。
+      shift 2  # 跳过该参数及其值。
+      ;;
+    --whispercpp-method)  # 捕获 --whispercpp-method 参数。
+      WHISPERCPP_METHOD="$2"  # 记录安装方式。
+      shift 2  # 跳过参数与值。
+      ;;
+    --whispercpp-dir)  # 捕获 --whispercpp-dir 参数。
+      WHISPERCPP_DIR="$2"  # 覆盖 whisper.cpp 安装目录。
+      shift 2  # 跳过参数与值。
+      ;;
+    --whispercpp-exe)  # 捕获 --whispercpp-exe 参数。
+      WHISPERCPP_EXE="$2"  # 记录用户提供的可执行文件路径。
+      shift 2  # 跳过参数与值。
+      ;;
     --extra-index-url)  # 捕获 --extra-index-url 参数。
       EXTRA_INDEX_URL="$2"  # 保存额外的 pip 索引地址。
       shift 2  # 跳过该参数与其值。
@@ -81,6 +107,9 @@ while [[ $# -gt 0 ]]; do  # 开始解析命令行参数。
       ;;
   esac  # 结束 case 结构。
 done  # 完成所有参数解析。
+if [[ -z "${WHISPERCPP_DIR}" ]]; then  # 若未指定 whisper.cpp 目录。
+  WHISPERCPP_DIR="${CACHE_DIR}/whispercpp"  # 默认放置在 cache-dir 下的 whispercpp。
+fi  # 完成目录推导。
 resolve_python() {  # 定义函数用于确定 Python 解释器。
   if [[ -n "${PYTHON_PATH}" ]]; then  # 若用户显式指定解释器。
     echo "${PYTHON_PATH}"  # 返回指定路径。
@@ -106,6 +135,10 @@ print_parameters() {  # 定义函数打印解析后的参数信息。
   echo "backend             : ${MODEL_BACKEND}"  # 显示模型后端。
   echo "model               : ${MODEL_NAME}"  # 显示模型规格。
   echo "models-dir          : ${MODELS_DIR}"  # 显示模型缓存目录。
+  echo "with-whispercpp     : ${WITH_WHISPERCPP}"  # 显示是否安装 whisper.cpp。
+  echo "whispercpp-method   : ${WHISPERCPP_METHOD}"  # 显示安装方式。
+  echo "whispercpp-dir      : ${WHISPERCPP_DIR}"  # 显示 whisper.cpp 目录。
+  echo "whispercpp-exe      : ${WHISPERCPP_EXE:-<未指定>}"  # 显示用户提供的可执行路径。
   echo "extra-index-url     : ${EXTRA_INDEX_URL:-<未指定>}"  # 显示额外 pip 索引。
   echo "仓库根目录          : ${REPO_ROOT}"  # 显示仓库根目录路径。
   echo  # 输出空行分隔。
@@ -126,11 +159,20 @@ ensure_directory() {  # 定义函数用于创建目录。
 }  # 结束目录创建函数。
 run_verify() {  # 定义函数执行环境体检脚本。
   local python_exec="$1"  # 接收用于运行体检的 Python 解释器。
-  "${python_exec}" "${SCRIPT_DIR}/verify_env.py" \
-    --backend "${MODEL_BACKEND}" \
-    --model "${MODEL_NAME}" \
-    --models-dir "${MODELS_DIR}" \
-    --cache-dir "${CACHE_DIR}"  # 调用体检脚本并传入模型相关参数。
+  local verify_args=(  # 构造体检脚本的基础参数数组。
+    "${SCRIPT_DIR}/verify_env.py"
+    --backend "${MODEL_BACKEND}"
+    --model "${MODEL_NAME}"
+    --models-dir "${MODELS_DIR}"
+    --cache-dir "${CACHE_DIR}"
+  )
+  if [[ -n "${WHISPERCPP_RESOLVED_EXE}" ]]; then  # 若已解析 whisper.cpp 可执行文件。
+    verify_args+=(--whispercpp-exe "${WHISPERCPP_RESOLVED_EXE}")  # 将参数加入数组。
+  fi  # 结束可执行文件判断。
+  if [[ -n "${WHISPERCPP_MODEL_PATH}" ]]; then  # 若已获得模型路径。
+    verify_args+=(--whispercpp-model "${WHISPERCPP_MODEL_PATH}")  # 将模型路径传递给体检脚本。
+  fi  # 结束模型路径判断。
+  "${python_exec}" "${verify_args[@]}"  # 执行体检脚本。
 }  # 结束体检函数。
 install_python_requirements() {  # 定义函数安装 Python 依赖。
   local python_exec="$1"  # 接收虚拟环境中的 Python。
@@ -335,6 +377,196 @@ prepare_ffmpeg() {  # 定义函数处理 ffmpeg 安装逻辑。
   append_path_once "${ffmpeg_dir}"  # 将该目录加入 PATH。
   echo "[INFO] 已将 ${ffmpeg_dir} 加入 PATH（仅当前会话有效）。"  # 提示用户 PATH 更新。
 }  # 结束 ffmpeg 准备函数。
+
+download_whispercpp_prebuilt() {  # 定义函数尝试下载预编译的 whisper.cpp 可执行文件。
+  local platform="$1"  # 接收当前平台。
+  local install_dir="$2"  # 接收安装目录。
+  ensure_directory "${install_dir}"  # 确保安装目录存在。
+  ensure_directory "${install_dir}/bin"  # 创建 bin 子目录存放可执行文件。
+  case "${platform}" in  # 根据平台选择不同的预编译包。
+    windows)  # 针对 Windows 平台。
+      local archive_url="https://github.com/ggml-org/whisper.cpp/releases/latest/download/whisper-bin-x64.zip"  # 官方提供的 x64 预编译包。
+      local archive_name="whisper-bin-x64.zip"  # 下载文件名。
+      local target_dir="${install_dir}/prebuilt"  # 定义缓存目录。
+      fetch_and_extract_zip "${archive_url}" "${archive_name}" "${target_dir}"  # 下载并解压 zip。
+      local candidates=("${target_dir}/extracted/Release/main.exe" "${target_dir}/extracted"/*/Release/main.exe)  # 预估可能的可执行路径。
+      for candidate in "${candidates[@]}"; do  # 遍历候选路径。
+        if [[ -f "${candidate}" ]]; then  # 如果文件存在。
+          local dest="${install_dir}/bin/whisper_cpp.exe"  # 定义目标文件路径。
+          cp "${candidate}" "${dest}"  # 复制可执行文件。
+          chmod +x "${dest}"  # 确保具有执行权限。
+          echo "${dest}"  # 输出最终可执行文件路径。
+          return 0  # 返回成功状态。
+        fi  # 未找到则继续。
+      done  # 遍历结束。
+      echo ""  # 未找到时返回空字符串。
+      return 1  # 返回失败状态。
+      ;;
+    linux)  # 针对 Linux 平台。
+      echo "[INFO] 官方未提供 Linux 预编译 whisper.cpp，将尝试源码构建。"  # 提示回退策略。
+      return 1  # 返回失败以便上层回退。
+      ;;
+    macos)  # 针对 macOS 平台。
+      echo "[INFO] 官方未提供 macOS 预编译 CLI，将尝试源码构建。"  # 提示用户。
+      return 1  # 返回失败。
+      ;;
+    *)  # 未识别的平台。
+      echo "[WARN] 未知平台无法自动下载 whisper.cpp。"  # 输出警告。
+      return 1  # 返回失败。
+      ;;
+  esac  # 结束平台分支。
+}  # 结束预编译下载函数。
+
+build_whispercpp_from_source() {  # 定义函数从源码构建 whisper.cpp。
+  local install_dir="$1"  # 接收安装目录。
+  local platform="$2"  # 接收平台标识。
+  local src_dir="${install_dir}/src"  # 源码目录。
+  local build_dir="${src_dir}/build"  # 构建输出目录。
+  ensure_directory "${install_dir}/bin"  # 确保目标 bin 目录存在。
+  if ! command -v git >/dev/null 2>&1; then  # 检查 git 是否可用。
+    echo "[ERROR] 缺少 git，无法克隆 whisper.cpp 仓库。"  # 输出错误提示。
+    echo "[HINT] 请安装 git 后重新运行或手动下载源代码。"  # 给出建议。
+    return 1  # 返回失败。
+  fi  # git 可用时继续。
+  if [[ ! -d "${src_dir}/.git" ]]; then  # 若尚未克隆仓库。
+    echo "[INFO] 正在克隆 whisper.cpp 仓库..."  # 输出提示。
+    if ! git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git "${src_dir}"; then  # 克隆仓库。
+      echo "[ERROR] 克隆 whisper.cpp 仓库失败，请检查网络。"  # 输出错误信息。
+      return 1  # 返回失败。
+    fi  # 克隆成功。
+  else  # 仓库已存在。
+    echo "[INFO] 更新已有的 whisper.cpp 仓库..."  # 输出提示。
+    if ! git -C "${src_dir}" pull --ff-only; then  # 拉取最新代码。
+      echo "[WARN] 仓库更新失败，继续使用现有代码。"  # 输出警告但不中断。
+    fi  # 更新完成。
+  fi  # 仓库准备结束。
+  if ! command -v cmake >/dev/null 2>&1; then  # 检查 cmake。
+    echo "[ERROR] 未检测到 cmake，无法构建 whisper.cpp。"  # 输出错误。
+    echo "[HINT] 请参考官方 README 安装 cmake。"  # 给出建议。
+    return 1  # 返回失败。
+  fi  # cmake 可用。
+  echo "[INFO] 运行 cmake 配置..."  # 输出提示。
+  if ! cmake -S "${src_dir}" -B "${build_dir}" -DCMAKE_BUILD_TYPE=Release >/dev/null; then  # 执行配置。
+    echo "[ERROR] cmake 配置阶段失败，请检查编译器环境。"  # 输出错误信息。
+    return 1  # 返回失败。
+  fi  # 配置成功。
+  echo "[INFO] 开始构建 whisper.cpp (platform=${platform})..."  # 输出构建提示。
+  if ! cmake --build "${build_dir}" --config Release >/dev/null; then  # 执行编译。
+    echo "[ERROR] 构建 whisper.cpp 失败，请检查编译日志。"  # 输出错误。
+    echo "[HINT] 可在 ${build_dir} 查看详细日志或手动执行 make。"  # 给出建议。
+    return 1  # 返回失败。
+  fi  # 构建成功。
+  local candidates=(  # 枚举可能的可执行文件路径。
+    "${build_dir}/bin/main"
+    "${build_dir}/main"
+    "${build_dir}/Release/main"
+    "${build_dir}/Release/main.exe"
+    "${build_dir}/bin/Release/main"
+    "${build_dir}/bin/Release/main.exe"
+  )
+  for candidate in "${candidates[@]}"; do  # 遍历候选路径。
+    if [[ -f "${candidate}" ]]; then  # 如果找到可执行文件。
+      local dest="${install_dir}/bin/whisper_cpp"  # 定义目标文件路径。
+      if [[ "${candidate}" == *.exe ]]; then  # Windows 可执行需要扩展名。
+        dest="${dest}.exe"  # 添加 .exe 扩展。
+      fi  # 结束扩展名处理。
+      cp "${candidate}" "${dest}"  # 复制可执行文件。
+      chmod +x "${dest}"  # 确保可执行。
+      echo "${dest}"  # 输出路径。
+      return 0  # 返回成功。
+    fi  # 未找到则继续。
+  done  # 遍历结束。
+  echo "[ERROR] 构建成功但未找到 main 可执行文件。"  # 输出错误。
+  echo "[HINT] 请查看 ${build_dir} 下的产物并手动复制。"  # 给出建议。
+  return 1  # 返回失败。
+}  # 结束源码构建函数。
+
+prepare_whispercpp() {  # 定义 orchestrator 函数准备 whisper.cpp。
+  local platform="$1"  # 接收平台标识。
+  ensure_directory "${WHISPERCPP_DIR}"  # 确保基础目录存在。
+  ensure_directory "${WHISPERCPP_DIR}/bin"  # 创建 bin 目录。
+  if [[ -n "${WHISPERCPP_EXE}" ]]; then  # 若用户提供可执行文件。
+    if [[ -f "${WHISPERCPP_EXE}" ]]; then  # 路径存在。
+      local exe_dir="$(cd "$(dirname "${WHISPERCPP_EXE}")" && pwd)"  # 解析目录。
+      WHISPERCPP_RESOLVED_EXE="${exe_dir}/$(basename "${WHISPERCPP_EXE}")"  # 计算绝对路径。
+      echo "[INFO] 使用用户提供的 whisper.cpp 可执行文件：${WHISPERCPP_RESOLVED_EXE}"  # 输出提示。
+      return 0  # 直接返回成功。
+    else  # 路径不存在。
+      echo "[WARN] --whispercpp-exe 指定的文件不存在：${WHISPERCPP_EXE}"  # 输出警告。
+    fi  # 用户提供路径检查结束。
+  fi  # 未提供时继续安装逻辑。
+  local exe_path=""  # 初始化结果路径。
+  if [[ "${WHISPERCPP_METHOD}" == "prebuilt" || "${WHISPERCPP_METHOD}" == "auto" ]]; then  # 预编译模式。
+    exe_path="$(download_whispercpp_prebuilt "${platform}" "${WHISPERCPP_DIR}")"  # 尝试下载预编译包。
+    if [[ -n "${exe_path}" ]]; then  # 成功获取可执行文件。
+      WHISPERCPP_RESOLVED_EXE="${exe_path}"  # 记录路径。
+      return 0  # 返回成功。
+    fi  # 预编译失败时继续。
+    if [[ "${WHISPERCPP_METHOD}" == "prebuilt" ]]; then  # 若用户强制 prebuilt。
+      echo "[ERROR] 未能获取 whisper.cpp 预编译包，请改用 --whispercpp-method build。"  # 输出错误。
+      return 1  # 返回失败。
+    fi  # auto 模式下将继续尝试构建。
+  fi  # 结束预编译分支。
+  if [[ "${WHISPERCPP_METHOD}" == "build" || "${WHISPERCPP_METHOD}" == "auto" ]]; then  # 源码构建模式。
+    exe_path="$(build_whispercpp_from_source "${WHISPERCPP_DIR}" "${platform}")"  # 尝试构建。
+    if [[ -n "${exe_path}" ]]; then  # 构建成功。
+      WHISPERCPP_RESOLVED_EXE="${exe_path}"  # 记录路径。
+      return 0  # 返回成功。
+    fi  # 构建失败时继续。
+  fi  # 结束构建分支。
+  echo "[ERROR] 无法准备 whisper.cpp 可执行文件，请参考官方 README 手动安装。"  # 输出错误。
+  return 1  # 返回失败。
+}  # 结束准备函数。
+
+run_model_download() {  # 定义辅助函数，统一调用模型下载脚本。
+  local python_exec="$1"  # 接收 Python 解释器。
+  local backend="$2"  # 记录目标后端。
+  local model="$3"  # 记录模型规格。
+  local result_var="$4"  # 记录需要写入的变量名。
+  shift 4  # 移除已消费的参数。
+  local extra_args=("$@")  # 捕获其余附加参数。
+  local download_cmd=(  # 构建基础命令数组。
+    "${python_exec}"
+    "${SCRIPT_DIR}/download_model.py"
+    "--backend" "${backend}"
+    "--model" "${model}"
+    "--cache-dir" "${CACHE_DIR}"
+  )
+  if [[ -n "${MODELS_DIR}" ]]; then  # 若指定模型目录。
+    download_cmd+=("--models-dir" "${MODELS_DIR}")  # 追加参数。
+  fi  # 结束模型目录判断。
+  download_cmd+=("${extra_args[@]}")  # 附加额外参数。
+  echo "[INFO] 调用模型下载器：${download_cmd[*]}"  # 打印命令。
+  local download_output=""  # 初始化输出缓存。
+  if download_output=$("${download_cmd[@]}" 2>&1); then  # 执行命令并捕获输出。
+    echo "${download_output}"  # 将输出原样打印。
+    local json_line="$(echo "${download_output}" | awk 'NF{line=$0} END{print line}')"  # 提取最后一行。
+    echo "[INFO] 模型下载结果 JSON：${json_line}"  # 打印 JSON 行。
+    local model_path=""  # 初始化模型路径变量。
+    if [[ -n "${json_line}" ]]; then  # 若存在 JSON 字符串。
+      model_path="$(printf '%s' "${json_line}" | python - <<'PYBLOCK'
+import json, sys
+try:
+    payload = sys.stdin.read()
+    data = json.loads(payload)
+except Exception:
+    print("")
+else:
+    print(data.get("path", ""))
+PYBLOCK
+)"  # 使用 Python 解析 JSON 并返回 path。
+    fi  # JSON 解析结束。
+    printf -v "${result_var}" '%s' "${model_path}"  # 将路径写入调用方变量。
+    return 0  # 成功结束。
+  else  # 下载脚本返回非零状态。
+    local status=$?  # 记录退出码。
+    echo "${download_output}"  # 输出错误日志。
+    echo "[WARN] 模型下载脚本退出码为 ${status}，请稍后重试或参考 README 手动准备模型。"  # 给出提示。
+    printf -v "${result_var}" ''  # 将结果变量清空。
+    return "${status}"  # 返回原始退出码。
+  fi  # 下载命令执行结束。
+}  # 结束模型下载辅助函数。
+
 main() {  # 定义主流程函数。
   print_parameters  # 打印用户输入。
   print_system_info  # 输出系统信息。
@@ -378,22 +610,27 @@ main() {  # 定义主流程函数。
   if ! prepare_ffmpeg "${platform}" "${FFMPEG_CACHE_ROOT}"; then  # 调用函数确保 ffmpeg 可用。
     echo "[WARN] 自动准备 ffmpeg 失败，请参阅 README 手动安装。"  # 输出警告但不中断流程。
   fi  # ffmpeg 准备完成或失败。
+  if [[ "${WITH_WHISPERCPP}" == "true" ]]; then  # 当用户请求安装 whisper.cpp。
+    echo "[INFO] 需要准备 whisper.cpp，可执行目录：${WHISPERCPP_DIR}"  # 输出提示。
+    if prepare_whispercpp "${platform}"; then  # 调用准备函数。
+      echo "[INFO] whisper.cpp 可执行文件准备完成：${WHISPERCPP_RESOLVED_EXE}"  # 成功提示。
+      append_path_once "$(dirname "${WHISPERCPP_RESOLVED_EXE}")"  # 将可执行目录加入 PATH。
+    else  # 函数返回失败。
+      echo "[WARN] whisper.cpp 准备失败，请参照 README 手动安装。"  # 输出警告。
+    fi  # 结束准备分支。
+  fi  # 完成 whisper.cpp 处理。
   echo "[INFO] 准备执行模型下载流程。"  # 提示即将下载模型。
-  local download_cmd=("${venv_python}" "${SCRIPT_DIR}/download_model.py" "--backend" "${MODEL_BACKEND}" "--model" "${MODEL_NAME}" "--cache-dir" "${CACHE_DIR}")  # 构造模型下载命令数组。
-  if [[ -n "${MODELS_DIR}" ]]; then  # 若用户指定模型目录。
-    download_cmd+=("--models-dir" "${MODELS_DIR}")  # 将目录参数加入命令。
-  fi  # 结束目录判断。
-  echo "[INFO] 调用模型下载器：${download_cmd[*]}"  # 打印命令以便调试。
-  local download_output=""  # 预留变量存储下载输出。
-  if download_output=$("${download_cmd[@]}" 2>&1); then  # 执行模型下载器并捕获输出。
-    echo "${download_output}"  # 将下载器的日志原样输出给用户。
-    local download_json="$(echo "${download_output}" | awk 'NF{line=$0} END{print line}')"  # 提取最后一个非空行作为 JSON 信息。
-    echo "[INFO] 模型下载结果 JSON：${download_json}"  # 打印 JSON 行，方便用户确认路径。
-  else  # 当下载脚本返回非零状态时。
-    local download_status=$?  # 记录退出码。
-    echo "${download_output}"  # 输出脚本日志。
-    echo "[WARN] 模型下载脚本退出码为 ${download_status}，请稍后重试或按 README 手动准备模型。"  # 提示用户可选操作。
-  fi  # 下载流程结束。
+  local generic_model_path=""  # 初始化占位变量存储通用模型路径。
+  if ! run_model_download "${venv_python}" "${MODEL_BACKEND}" "${MODEL_NAME}" generic_model_path; then  # 调用模型下载器。
+    echo "[WARN] 主后端模型下载出现问题，可稍后重试或手动处理。"  # 输出警告。
+  fi  # 完成主后端模型处理。
+  if [[ "${WITH_WHISPERCPP}" == "true" ]]; then  # 若需要下载 whisper.cpp 模型。
+    if ! run_model_download "${venv_python}" "whisper.cpp" "${MODEL_NAME}" WHISPERCPP_MODEL_PATH; then  # 调用下载器。
+      echo "[WARN] whisper.cpp 模型下载失败，请参照 README 手动放置 GGUF/GGML。"  # 输出警告。
+    else  # 下载成功时输出路径。
+      echo "[INFO] whisper.cpp 模型已准备：${WHISPERCPP_MODEL_PATH}"  # 打印结果。
+    fi  # 结束 whisper.cpp 模型下载分支。
+  fi  # 完成 whisper.cpp 模型处理。
   echo "[INFO] 开始运行 verify_env.py 进行最终体检。"  # 提示即将执行环境检查。
   run_verify "${venv_python}"  # 使用虚拟环境解释器运行体检。
   echo  # 输出空行提升可读性。
