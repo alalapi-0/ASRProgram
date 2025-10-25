@@ -21,6 +21,16 @@ runtime:  # 新增运行时默认设置集合。
   chunk_length_s: null  # 可选切块长度（秒），null 使用库默认值。
   best_of: null  # 采样模式下的候选数，beam search 时忽略。
   patience: null  # beam search 提前停止阈值，可保持 null。
+  whisper_cpp:  # whisper.cpp 后端的运行默认值。
+    executable_path: ""  # 可执行文件路径，安装脚本会尝试写入或提示用户手动填写。
+    model_path: ""  # GGML/GGUF 模型文件路径，建议存放在 models/whisper.cpp/ 下。
+    threads: 0  # 线程数，0 表示由 whisper.cpp 自动根据硬件选择。
+    beam_size: 5  # beam search 宽度，与 faster-whisper 保持一致。
+    temperature: 0.0  # 温度参数，0 表示贪心策略。
+    max_len: null  # 输出最大 token 数，null 表示使用默认。
+    prompt: null  # 初始提示词，可在 CLI 中覆盖。
+    print_progress: false  # 是否打印进度条，默认关闭以减少日志噪音。
+    timeout_sec: null  # 子进程调用超时时间，null 表示不设置超时。
 backend:  # 后端下载相关默认值聚合于此字典。
   default: faster-whisper  # 推荐的真实后端为 faster-whisper。
 model:  # 模型配置相关键集合。

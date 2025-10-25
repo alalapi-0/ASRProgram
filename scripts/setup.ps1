@@ -16,6 +16,12 @@ $DefaultModelsDir = Join-Path $HOME '.cache/asrprogram/models'  # 默认模型�
 $ModelsDir = $DefaultModelsDir  # 当前模型缓存目录，初始为默认值。
 $ExtraIndexUrl = ''  # 允许用户指定额外的 pip 索引。
 $RequirementsFile = Join-Path $RepoRoot 'requirements.txt'  # 指定依赖清单文件路径。
+$WithWhisperCpp = 'false'  # 默认不安装 whisper.cpp，可通过参数开启。
+$WhisperCppMethod = 'auto'  # whisper.cpp 安装方式，auto 会优先预编译后源码构建。
+$WhisperCppDir = ''  # whisper.cpp 安装目录，后续根据 cache-dir 推导。
+$WhisperCppExe = ''  # 用户提供的 whisper.cpp 可执行文件路径。
+$WhisperCppResolvedExe = ''  # 实际使用的 whisper.cpp 可执行文件路径。
+$WhisperCppModelPath = ''  # whisper.cpp 模型文件路径，供 verify 使用。
 function Show-Help {  # 定义函数输出脚本帮助信息。
     Write-Host '用法：pwsh -File scripts/setup.ps1 [参数]'  # 打印用法示例。
     Write-Host '  -check-only true|false        是否仅执行环境体检，默认 false。'  # 说明 check-only 参数。
@@ -26,6 +32,10 @@ function Show-Help {  # 定义函数输出脚本帮助信息。
     Write-Host '  -backend <name>               指定模型下载后端，默认 faster-whisper。'  # 说明模型后端参数。
     Write-Host '  -model <name>                 指定模型规格，默认 medium。'  # 说明模型规格参数。
     Write-Host '  -models-dir <path>            指定模型缓存目录，默认 ~/.cache/asrprogram/models。'  # 说明模型目录参数。
+    Write-Host '  -with-whispercpp true|false   是否安装 whisper.cpp 可执行文件，默认 false。'  # 说明 whispercpp 开关。
+    Write-Host '  -whispercpp-method <mode>     指定安装方式 auto|build|prebuilt，默认 auto。'  # 说明安装方式。
+    Write-Host '  -whispercpp-dir <path>        whisper.cpp 的缓存目录，默认 <cache-dir>/whispercpp。'  # 说明安装目录。
+    Write-Host '  -whispercpp-exe <path>        已存在的 whisper.cpp 可执行文件路径。'  # 说明可执行覆盖。
     Write-Host '  -extra-index-url <url>        为 pip 安装追加索引源。'  # 说明额外索引参数。
     Write-Host '  -help                         查看帮助信息并退出。'  # 说明帮助参数。
 }  # 结束帮助函数定义。
@@ -80,6 +90,30 @@ for ($i = 0; $i -lt $args.Length; $i++) {  # 使用循环逐项解析用户输�
                 $i++  # 跳过值。
             }
         }
+        '-with-whispercpp' {  # 解析 -with-whispercpp 参数。
+            if ($i + 1 -lt $args.Length) {  # 校验值是否存在。
+                $WithWhisperCpp = $args[$i + 1]  # 记录是否安装 whisper.cpp。
+                $i++  # 跳过值。
+            }
+        }
+        '-whispercpp-method' {  # 解析 -whispercpp-method 参数。
+            if ($i + 1 -lt $args.Length) {  # 校验值是否存在。
+                $WhisperCppMethod = $args[$i + 1]  # 记录安装方式。
+                $i++  # 跳过值。
+            }
+        }
+        '-whispercpp-dir' {  # 解析 -whispercpp-dir 参数。
+            if ($i + 1 -lt $args.Length) {  # 校验值是否存在。
+                $WhisperCppDir = $args[$i + 1]  # 覆盖安装目录。
+                $i++  # 跳过值。
+            }
+        }
+        '-whispercpp-exe' {  # 解析 -whispercpp-exe 参数。
+            if ($i + 1 -lt $args.Length) {  # 校验值是否存在。
+                $WhisperCppExe = $args[$i + 1]  # 记录用户提供的可执行文件路径。
+                $i++  # 跳过值。
+            }
+        }
         '-extra-index-url' {  # 解析 -extra-index-url 参数。
             if ($i + 1 -lt $args.Length) {  # 校验值是否存在。
                 $ExtraIndexUrl = $args[$i + 1]  # 记录额外索引地址。
@@ -95,6 +129,9 @@ for ($i = 0; $i -lt $args.Length; $i++) {  # 使用循环逐项解析用户输�
         }
     }
 }  # 完成参数解析。
+if (-not $WhisperCppDir) {  # 若未指定 whisper.cpp 目录。
+    $WhisperCppDir = Join-Path $CacheDir 'whispercpp'  # 默认位于缓存目录下。
+}  # 完成目录推导。
 Write-Host '---- 参数解析结果 ----'  # 打印标题。
 Write-Host "check-only          : $CheckOnly"  # 展示 check-only 配置。
 Write-Host ("python              : {0}" -f (if ($PythonPath) { $PythonPath } else { '<自动检测>' }))  # 展示 Python 路径或占位符。
@@ -104,6 +141,10 @@ Write-Host "venv-dir            : $VenvDir"  # 展示虚拟环境目录。
 Write-Host "backend             : $ModelBackend"  # 展示模型后端。
 Write-Host "model               : $ModelName"  # 展示模型规格。
 Write-Host "models-dir          : $ModelsDir"  # 展示模型目录。
+Write-Host "with-whispercpp     : $WithWhisperCpp"  # 展示是否安装 whisper.cpp。
+Write-Host "whispercpp-method   : $WhisperCppMethod"  # 展示安装方式。
+Write-Host "whispercpp-dir      : $WhisperCppDir"  # 展示安装目录。
+Write-Host ("whispercpp-exe      : {0}" -f (if ($WhisperCppExe) { $WhisperCppExe } else { '<未指定>' }))  # 展示可执行路径。
 Write-Host ("extra-index-url     : {0}" -f (if ($ExtraIndexUrl) { $ExtraIndexUrl } else { '<未指定>' }))  # 展示额外索引。
 Write-Host "仓库根目录          : $RepoRoot"  # 展示仓库根目录。
 Write-Host ''  # 输出空行便于阅读。
@@ -154,11 +195,14 @@ function Ensure-Directory {  # 定义函数确保目录存在。
 }  # 结束目录创建函数。
 function Run-Verify {  # 定义函数执行 verify_env.py 脚本。
     param([string]$PythonExecutable)  # 声明 Python 路径参数。
-    & $PythonExecutable (Join-Path $ScriptDir 'verify_env.py') `  # 调用验证脚本并传参。
-        --backend $ModelBackend `  # 传入后端参数。
-        --model $ModelName `  # 传入模型规格。
-        --models-dir $ModelsDir `  # 传入模型目录。
-        --cache-dir $CacheDir  # 传入缓存目录。
+    $arguments = @((Join-Path $ScriptDir 'verify_env.py'), '--backend', $ModelBackend, '--model', $ModelName, '--models-dir', $ModelsDir, '--cache-dir', $CacheDir)  # 构建基础参数数组。
+    if ($WhisperCppResolvedExe) {  # 若已解析 whisper.cpp 可执行文件。
+        $arguments += @('--whispercpp-exe', $WhisperCppResolvedExe)  # 追加可执行参数。
+    }
+    if ($WhisperCppModelPath) {  # 若已获得模型路径。
+        $arguments += @('--whispercpp-model', $WhisperCppModelPath)  # 追加模型路径参数。
+    }
+    & $PythonExecutable @arguments  # 执行验证脚本。
 }  # 结束体检函数。
 function Invoke-Pip {  # 定义函数封装 python -m pip 调用。
     param(  # 声明参数块。
@@ -388,6 +432,161 @@ function Get-VenvPython {  # 定义函数返回虚拟环境中的 Python 路径�
     $unixPython = Join-Path $VenvPath 'bin/python'  # 类 Unix 路径。
     return $unixPython  # 返回默认路径（假定存在）。
 }  # 结束获取 Python 函数。
+function Invoke-WhisperCppPrebuilt {  # 定义函数尝试下载预编译的 whisper.cpp。
+    param([string]$Platform, [string]$InstallRoot)  # 声明参数。
+    Ensure-Directory -Path $InstallRoot  # 确保安装目录存在。
+    $binDir = Join-Path $InstallRoot 'bin'  # 构造 bin 目录。
+    Ensure-Directory -Path $binDir  # 确保 bin 目录存在。
+    switch ($Platform) {  # 根据平台选择处理策略。
+        'windows' {
+            $archiveUrl = 'https://github.com/ggml-org/whisper.cpp/releases/latest/download/whisper-bin-x64.zip'  # 官方提供的 Windows 预编译包。
+            $archiveName = 'whisper-bin-x64.zip'  # 下载文件名。
+            $targetDir = Join-Path $InstallRoot 'prebuilt'  # 缓存目录。
+            Ensure-Directory -Path $targetDir  # 确保目录存在。
+            $archivePath = Join-Path $targetDir $archiveName  # 构造文件路径。
+            if (-not (Test-Path -LiteralPath $archivePath)) {
+                Write-Host "[INFO] 正在下载 whisper.cpp 预编译包:$archiveUrl"  # 输出提示。
+                Fetch-File -Url $archiveUrl -Destination $archivePath  # 执行下载。
+            } else {
+                Write-Host '[INFO] 检测到已下载的 whisper.cpp 预编译包，跳过重新下载。'  # 提示已存在。
+            }
+            $extractDir = Join-Path $targetDir 'extracted'  # 定义解压目录。
+            if (-not (Test-Path -LiteralPath $extractDir -PathType Container)) {
+                Write-Host '[INFO] 正在解压 whisper.cpp 预编译包。'  # 输出提示。
+                Expand-ZipArchive -ArchivePath $archivePath -Destination $extractDir  # 解压 zip。
+            } else {
+                Write-Host '[INFO] 已存在解压目录，保持幂等。'  # 提示重复执行。
+            }
+            $exe = Get-ChildItem -Path $extractDir -Filter 'main.exe' -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1  # 查找 main.exe。
+            if ($exe) {
+                $destination = Join-Path $binDir 'whisper_cpp.exe'  # 构造目标路径。
+                Copy-Item -LiteralPath $exe.FullName -Destination $destination -Force  # 复制文件。
+                return $destination  # 返回最终路径。
+            }
+            Write-Host '[WARN] 未在预编译包中找到 main.exe，请改用源码构建。'  # 输出警告。
+            return ''  # 返回空字符串。
+        }
+        'linux' {
+            Write-Host '[INFO] 官方未提供 Linux 预编译 whisper.cpp，将尝试源码构建。'  # 提示用户。
+            return ''  # 返回空字符串。
+        }
+        'macos' {
+            Write-Host '[INFO] 官方未提供 macOS 预编译 whisper.cpp，将尝试源码构建。'  # 提示用户。
+            return ''  # 返回空字符串。
+        }
+        default {
+            Write-Host '[WARN] 未识别的平台，无法自动下载 whisper.cpp。'  # 输出警告。
+            return ''  # 返回空字符串。
+        }
+    }
+}  # 结束预编译下载函数。
+
+function Build-WhisperCppFromSource {  # 定义函数从源码构建 whisper.cpp。
+    param([string]$InstallRoot, [string]$Platform)  # 声明参数。
+    $sourceDir = Join-Path $InstallRoot 'src'  # 源码目录。
+    $buildDir = Join-Path $sourceDir 'build'  # 构建目录。
+    Ensure-Directory -Path (Join-Path $InstallRoot 'bin')  # 确保 bin 目录存在。
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {  # 检查 git。
+        Write-Host '[ERROR] 未检测到 git，无法克隆 whisper.cpp 仓库。'  # 输出错误。
+        Write-Host '[HINT] 请安装 git 后重新运行或手动下载源码。'  # 提示用户。
+        return ''  # 返回空字符串。
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $sourceDir '.git'))) {  # 若仓库不存在。
+        Write-Host '[INFO] 正在克隆 whisper.cpp 仓库...'  # 输出提示。
+        & git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git $sourceDir  # 克隆仓库。
+    } else {
+        Write-Host '[INFO] 更新已有的 whisper.cpp 仓库...'  # 输出提示。
+        try { & git -C $sourceDir pull --ff-only | Out-Null } catch { Write-Host '[WARN] 仓库更新失败，继续使用现有代码。' }  # 更新失败仅警告。
+    }
+    if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {  # 检查 cmake。
+        Write-Host '[ERROR] 未检测到 cmake，无法构建 whisper.cpp。'  # 输出错误。
+        Write-Host '[HINT] 请参考官方 README 安装 cmake。'  # 提示用户。
+        return ''  # 返回空字符串。
+    }
+    Write-Host '[INFO] 运行 cmake 配置...'  # 输出提示。
+    & cmake -S $sourceDir -B $buildDir -DCMAKE_BUILD_TYPE=Release | Out-Null  # 执行配置。
+    Write-Host "[INFO] 开始构建 whisper.cpp (platform=$Platform)..."  # 输出提示。
+    & cmake --build $buildDir --config Release | Out-Null  # 执行构建。
+    $exe = Get-ChildItem -Path $buildDir -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^main(\.exe)?$' } | Select-Object -First 1  # 查找 main 可执行文件。
+    if ($exe) {  # 若找到可执行文件。
+        $destName = 'whisper_cpp'  # 默认文件名。
+        if ($exe.Name -like '*.exe') { $destName = 'whisper_cpp.exe' }  # Windows 环境添加扩展名。
+        $destPath = Join-Path (Join-Path $InstallRoot 'bin') $destName  # 构造目标路径。
+        Copy-Item -LiteralPath $exe.FullName -Destination $destPath -Force  # 复制文件。
+        return $destPath  # 返回路径。
+    }
+    Write-Host '[ERROR] 构建完成但未找到 main 可执行文件。'  # 输出错误。
+    Write-Host "[HINT] 请检查 $buildDir 下的构建产物并手动复制。"  # 提示用户。
+    return ''  # 返回空字符串。
+}  # 结束源码构建函数。
+
+function Prepare-WhisperCpp {  # 定义函数 orchestrator 准备 whisper.cpp。
+    param([string]$Platform)  # 声明平台参数。
+    Ensure-Directory -Path $WhisperCppDir  # 确保安装目录存在。
+    Ensure-Directory -Path (Join-Path $WhisperCppDir 'bin')  # 确保 bin 目录存在。
+    if ($WhisperCppExe) {  # 若用户提供可执行文件。
+        if (Test-Path -LiteralPath $WhisperCppExe -PathType Leaf) {  # 路径存在。
+            $WhisperCppResolvedExe = (Resolve-Path -LiteralPath $WhisperCppExe).Path  # 解析绝对路径。
+            Write-Host "[INFO] 使用用户提供的 whisper.cpp 可执行文件:$WhisperCppResolvedExe"  # 输出提示。
+            return $true  # 返回成功。
+        } else {
+            Write-Host "[WARN] -whispercpp-exe 指定的文件不存在:$WhisperCppExe"  # 输出警告。
+        }
+    }
+    $exePath = ''  # 初始化结果路径。
+    if ($WhisperCppMethod -in @('prebuilt', 'auto')) {  # 处理预编译模式。
+        $exePath = Invoke-WhisperCppPrebuilt -Platform $Platform -InstallRoot $WhisperCppDir  # 尝试下载。
+        if ($exePath) {
+            $WhisperCppResolvedExe = $exePath  # 记录路径。
+            return $true  # 返回成功。
+        } elseif ($WhisperCppMethod -eq 'prebuilt') {
+            Write-Host '[ERROR] 未能获取 whisper.cpp 预编译包，请改用 -whispercpp-method build。'  # 输出错误。
+            return $false  # 返回失败。
+        }
+    }
+    if ($WhisperCppMethod -in @('build', 'auto')) {  # 处理源码构建模式。
+        $exePath = Build-WhisperCppFromSource -InstallRoot $WhisperCppDir -Platform $Platform  # 尝试构建。
+        if ($exePath) {
+            $WhisperCppResolvedExe = $exePath  # 记录路径。
+            return $true  # 返回成功。
+        }
+    }
+    Write-Host '[ERROR] 无法准备 whisper.cpp 可执行文件，请参考官方 README 手动安装。'  # 输出错误。
+    return $false  # 返回失败。
+}  # 结束准备函数。
+
+function Invoke-ModelDownload {  # 定义函数调用模型下载脚本并返回路径。
+    param(
+        [string]$PythonExecutable,  # Python 解释器。
+        [string]$Backend,  # 模型后端。
+        [string]$Model,  # 模型规格。
+        [string]$ResultVariable  # 结果变量名。
+    )
+    $command = @($PythonExecutable, (Join-Path $ScriptDir 'download_model.py'), '--backend', $Backend, '--model', $Model, '--cache-dir', $CacheDir)  # 构建命令数组。
+    if ($ModelsDir) { $command += @('--models-dir', $ModelsDir) }  # 若指定模型目录则追加参数。
+    Write-Host "[INFO] 调用模型下载器:$($command -join ' ')"  # 打印命令。
+    $output = & $command 2>&1  # 执行命令并捕获输出。
+    $exitCode = $LASTEXITCODE  # 记录退出码。
+    if ($output) { $output | ForEach-Object { Write-Host $_ } }  # 回显输出。
+    if ($exitCode -ne 0) {
+        Write-Host "[WARN] 模型下载脚本退出码为 $exitCode，请稍后重试或手动准备模型。"  # 输出警告。
+        Set-Variable -Name $ResultVariable -Value '' -Scope Script  # 清空结果。
+        return $false  # 返回失败。
+    }
+    $jsonLine = ($output | Where-Object { $_ -and $_.Trim() } | Select-Object -Last 1)  # 提取最后一行 JSON。
+    Write-Host "[INFO] 模型下载结果 JSON：$jsonLine"  # 输出 JSON 行。
+    $pathValue = ''  # 初始化路径。
+    if ($jsonLine) {
+        try {
+            $data = $jsonLine | ConvertFrom-Json  # 解析 JSON。
+            if ($data.path) { $pathValue = [string]$data.path }  # 读取路径。
+        } catch {
+            $pathValue = ''  # 解析失败保持空。
+        }
+    }
+    Set-Variable -Name $ResultVariable -Value $pathValue -Scope Script  # 写入变量。
+    return $true  # 返回成功。
+}  # 结束模型下载函数。
 function Main {  # 定义主函数组织整体流程。
     Print-SystemInfo  # 输出系统信息。
     $pythonExecutable = Resolve-Python  # 确定 Python 解释器路径。
@@ -417,28 +616,27 @@ function Main {  # 定义主函数组织整体流程。
         Write-Host "[WARN] 自动准备 ffmpeg 失败：$($_.Exception.Message)"  # 输出警告。
         Write-Host '[HINT] 请参考 README Round 5 章节手动安装 ffmpeg/ffprobe。'  # 提供建议。
     }
-    Write-Host '[INFO] 准备执行模型下载流程。'  # 提示即将调用模型下载脚本。
-    $downloadScript = Join-Path $ScriptDir 'download_model.py'  # 计算模型下载脚本路径。
-    $downloadArgs = @('--backend', $ModelBackend, '--model', $ModelName, '--cache-dir', $CacheDir)  # 构建基础参数数组。
-    if ($ModelsDir) {  # 若模型目录参数非空。
-        $downloadArgs += @('--models-dir', $ModelsDir)  # 将模型目录追加到参数中。
-    }
-    $displayArgs = $downloadArgs -join ' '  # 组装用于展示的参数字符串。
-    Write-Host "[INFO] 调用模型下载器：$venvPython $downloadScript $displayArgs"  # 打印即将执行的命令。
-    $downloadOutput = & $venvPython $downloadScript @downloadArgs 2>&1  # 执行模型下载脚本并捕获输出。
-    $downloadExit = $LASTEXITCODE  # 记录退出码。
-    if ($downloadOutput) {  # 若脚本产生输出。
-        ($downloadOutput -split "`n") | ForEach-Object { Write-Host $_ }  # 逐行回显日志。
-    }
-    if ($downloadExit -eq 0 -and $downloadOutput) {  # 成功且有输出时。
-        $downloadLines = $downloadOutput -split "`n"  # 将输出拆分成数组。
-        $downloadJsonCandidates = $downloadLines | Where-Object { $_.Trim().Length -gt 0 }  # 过滤出非空行。
-        if ($downloadJsonCandidates.Count -gt 0) {  # 若存在非空行。
-            $downloadJson = $downloadJsonCandidates[$downloadJsonCandidates.Count - 1]  # 获取最后一个非空行作为 JSON。
-            Write-Host "[INFO] 模型下载结果 JSON：$downloadJson"  # 打印 JSON 结果。
+    if ($WithWhisperCpp -eq 'true') {  # 当用户请求安装 whisper.cpp。
+        Write-Host "[INFO] 需要准备 whisper.cpp,可执行目录:$WhisperCppDir"  # 输出提示。
+        if (Prepare-WhisperCpp -Platform $platform) {  # 调用准备函数。
+            Write-Host "[INFO] whisper.cpp 可执行文件准备完成:$WhisperCppResolvedExe"  # 输出成功信息。
+            $exeDirectory = Split-Path -LiteralPath $WhisperCppResolvedExe -Parent  # 解析目录。
+            Append-PathOnce -Directory $exeDirectory  # 将目录加入当前会话 PATH。
+        } else {
+            Write-Host '[WARN] whisper.cpp 准备失败,请参照 README 手动安装。'  # 输出警告。
         }
-    } elseif ($downloadExit -ne 0) {  # 当退出码非零时。
-        Write-Host "[WARN] 模型下载脚本退出码为 $downloadExit，请稍后重试或参考 README 手动准备模型。"  # 提示后续步骤。
+    }
+    Write-Host '[INFO] 准备执行模型下载流程。'  # 提示即将下载模型。
+    $genericModelPath = ''  # 初始化通用模型路径变量。
+    if (-not (Invoke-ModelDownload -PythonExecutable $venvPython -Backend $ModelBackend -Model $ModelName -ResultVariable 'genericModelPath')) {  # 调用模型下载脚本。
+        Write-Host '[WARN] 主后端模型下载出现问题,可稍后重试或手动处理。'  # 输出警告。
+    }
+    if ($WithWhisperCpp -eq 'true') {  # 若需要下载 whisper.cpp 模型。
+        if (-not (Invoke-ModelDownload -PythonExecutable $venvPython -Backend 'whisper.cpp' -Model $ModelName -ResultVariable 'WhisperCppModelPath')) {  # 下载 whisper.cpp 模型。
+            Write-Host '[WARN] whisper.cpp 模型下载失败,请参照 README 手动放置 GGUF/GGML。'  # 输出警告。
+        } elseif ($WhisperCppModelPath) {
+            Write-Host "[INFO] whisper.cpp 模型已准备:$WhisperCppModelPath"  # 输出成功信息。
+        }
     }
     Write-Host '[INFO] 开始运行 verify_env.py 进行最终体检。'  # 提示接下来执行体检。
     Run-Verify -PythonExecutable $venvPython  # 使用虚拟环境 Python 执行体检。
