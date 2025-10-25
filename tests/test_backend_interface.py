@@ -1,12 +1,21 @@
 """验证后端接口实现返回统一结构的最小测试。"""
+# 导入 importlib 尝试动态导入 faster_whisper。
+import importlib
 # 导入 pathlib.Path 以便创建临时文件路径。
 from pathlib import Path
 # 导入 sys 以将仓库根目录加入模块搜索路径。
 import sys
+
+# 导入 pytest 以便在依赖缺失时跳过测试。
+import pytest
+
 # 将仓库根目录添加到 sys.path，确保可以导入 src 包。
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 # 从后端注册工厂导入 create_transcriber 函数。
 from src.asr.backends import create_transcriber
+
+# 检测 faster-whisper 是否可用，用于条件跳过测试。
+HAS_FASTER_WHISPER = importlib.util.find_spec("faster_whisper") is not None
 
 # 定义辅助函数，校验返回结构是否满足约定。
 def assert_standard_structure(result: dict, expected_backend: str) -> None:
@@ -38,7 +47,9 @@ def test_registered_backends_return_standard_structure(tmp_path):
     dummy = create_transcriber("dummy", language="en")
     dummy_result = dummy.transcribe_file(str(fake_audio))
     assert_standard_structure(dummy_result, "dummy")
-    # 创建 faster-whisper 占位后端并执行转写。
+    if not HAS_FASTER_WHISPER:
+        pytest.skip("faster-whisper 未安装，跳过结构校验")
+    # 创建 faster-whisper 后端并执行转写。
     faster = create_transcriber("faster-whisper", language="en")
     faster_result = faster.transcribe_file(str(fake_audio))
     assert_standard_structure(faster_result, "faster-whisper")

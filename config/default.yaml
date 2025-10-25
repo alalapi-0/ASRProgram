@@ -8,6 +8,19 @@ overwrite: false  # 默认不覆盖已有结果。
 num_workers: 1  # 默认使用单线程处理。
 dry_run: false  # 默认真实落盘。
 verbose: false  # 默认关闭详细日志。
+runtime:  # 新增运行时默认设置集合。
+  backend: faster-whisper  # 推荐的真实后端。
+  language: auto  # 转写语言默认自动检测，可被 CLI 覆盖。
+  segments_json: true  # 是否输出段级 JSON。
+  overwrite: false  # 是否覆盖已有结果。
+  compute_type: auto  # faster-whisper compute_type，可设 int8/int8_float16/float16/float32。
+  device: auto  # 设备选择，auto 会在 GPU 可用时自动切换。
+  beam_size: 5  # 默认 beam search 宽度，1 可换取更快速度。
+  temperature: 0.0  # 默认温度，0 表示贪心/beam 搜索。
+  vad_filter: false  # 是否启用 VAD 过滤，Round 7 仅记录。
+  chunk_length_s: null  # 可选切块长度（秒），null 使用库默认值。
+  best_of: null  # 采样模式下的候选数，beam search 时忽略。
+  patience: null  # beam search 提前停止阈值，可保持 null。
 backend:  # 后端下载相关默认值聚合于此字典。
   default: faster-whisper  # 推荐的真实后端为 faster-whisper。
 model:  # 模型配置相关键集合。
