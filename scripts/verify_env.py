@@ -2,6 +2,7 @@
 """逐行注释的环境体检脚本，Round 7 增强 faster-whisper 检测。"""  # 描述脚本用途。
 import argparse  # 解析命令行参数。
 import platform  # 获取平台与 Python 版本信息。
+import inspect  # 检查 faster-whisper API 是否支持词级参数。
 import subprocess  # 调用外部命令读取工具版本。
 import sys  # 控制脚本退出码并访问解释器信息。
 from pathlib import Path  # 优雅地处理路径。
@@ -199,6 +200,18 @@ def try_lightweight_model_load(module: object, model_path: Path) -> Tuple[bool, 
     return True, "OK: 模型加载测试通过"  # 返回成功信息。
 
 
+def check_word_timestamp_support(module: object) -> str:
+    """检测 faster-whisper 是否接受 word_timestamps 参数并返回说明文本。"""  # 函数说明。
+    try:  # 捕获属性缺失或签名解析异常。
+        WhisperModel = getattr(module, "WhisperModel")  # 获取模型类。
+        signature = inspect.signature(WhisperModel.transcribe)  # 读取 transcribe 的参数签名。
+    except Exception:  # 任意异常均视为未知状态。
+        return "WARNING: 无法判断 word_timestamps 支持，请手动查阅 faster-whisper 版本。"  # 返回警告。
+    if "word_timestamps" in signature.parameters:  # 若签名包含目标参数。
+        return "OK: faster-whisper 支持 word_timestamps，词级时间戳已启用。"  # 返回肯定信息。
+    return "WARNING: 当前 faster-whisper 不接受 word_timestamps，请升级至 0.9+。"  # 返回缺失提示。
+
+
 def main() -> None:
     """脚本主入口，输出完整体检报告。"""  # 函数说明。
     defaults = load_defaults()  # 读取默认配置。
@@ -206,7 +219,7 @@ def main() -> None:
     args = parser.parse_args()  # 解析命令行参数。
     models_dir = Path(args.models_dir).expanduser().resolve()  # 解析模型目录。
     cache_dir = Path(args.cache_dir).expanduser().resolve()  # 解析缓存目录。
-    print("ASRProgram 环境体检报告（Round 7）")  # 打印标题。
+    print("ASRProgram 环境体检报告（Round 8）")  # 打印标题。
     print_kv("Python 解释器", sys.executable)  # 输出解释器路径。
     print_kv("Python 版本", platform.python_version())  # 输出 Python 版本。
     py_status, py_advice = evaluate_python_version()  # 获取 Python 状态。
@@ -226,6 +239,7 @@ def main() -> None:
         print("WARNING: 无法导入 faster-whisper，请运行 scripts/setup.sh")  # 提示安装依赖。
     else:  # 导入成功时。
         print_kv("faster-whisper 版本", fw_version or "未知")  # 输出版本。
+        print(check_word_timestamp_support(module))  # 输出词级时间戳支持状态。
     print_section("多媒体工具版本")  # 打印工具检测标题。
     print_kv("ffmpeg", check_tool_version("ffmpeg"))  # 输出 ffmpeg 版本。
     print_kv("ffprobe", check_tool_version("ffprobe"))  # 输出 ffprobe 版本。
