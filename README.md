@@ -30,6 +30,46 @@ ASRProgram 是一个演示性项目，用于将输入音频文件的元信息转
    python -m src.cli.main --input ./samples --out-dir ./out --backend dummy --segments-json true
    ```
 
+
+## 一键安装与环境自检（Round 2）
+本轮新增的 `scripts/setup.sh` 与 `scripts/setup.ps1` 均为**演练模式**脚本：无论 `--check-only` 取值为何，都只会打印未来计划，不会创建虚拟环境、安装依赖或下载模型。脚本末尾会真实执行 `scripts/verify_env.py`，输出当前环境体检报告。
+
+### 参数总览
+| 参数 | 默认值 | 适用脚本 | 说明 |
+| --- | --- | --- | --- |
+| `--check-only` / `-check-only` | `true` | Bash / PowerShell | 是否仅演练安装步骤，本轮即使为 `false` 也不会执行真实动作 |
+| `--backend` / `-backend` | `faster-whisper` | Bash / PowerShell | 计划使用的后端，用于展示未来将执行的模型准备流程 |
+| `--model` / `-model` | `medium` | Bash / PowerShell | 计划下载的模型规格，仅用于打印提示 |
+| `--use-system-ffmpeg` / `-use-system-ffmpeg` | `true` | Bash / PowerShell | 是否尝试复用系统 `ffmpeg`，当前仅检测 PATH |
+| `--python` / `-python` | *未指定* | Bash / PowerShell | 指定未来用于创建虚拟环境的解释器路径，本轮仅校验是否可执行 |
+| `--cache-dir` / `-cache-dir` | `.cache/` | Bash / PowerShell | 计划使用的缓存目录，仅检测是否已存在及可写 |
+
+### 典型命令
+```bash
+# Bash（Mac/Linux）
+bash scripts/setup.sh --check-only true --backend faster-whisper --model medium --use-system-ffmpeg true
+
+# PowerShell（Windows / pwsh）
+pwsh -File scripts/setup.ps1 -check-only true -backend faster-whisper -model medium -use-system-ffmpeg true
+
+# 单独运行环境体检（真实执行）
+python scripts/verify_env.py
+```
+
+### 预期输出片段
+```
+---- 计划步骤（仅打印，不执行） ----
+当前为 check-only 演练模式，不会执行任何写操作。
+1. 创建虚拟环境：python -m venv .venv
+...
+以下为真实探测结果：
+ASRProgram 环境体检报告（Round 2 演练模式）
+Python 解释器: /usr/bin/python3
+```
+
+> **提示**：Round 5 才会启用真实安装、模型下载与按平台分流的 `ffmpeg` 获取策略；当前轮次仅做准备与环境评估。
+
+
 ## 目录结构
 ```
 ASRProgram/
