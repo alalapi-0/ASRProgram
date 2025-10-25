@@ -1,30 +1,34 @@
-"""实现 Round 7 的真实转写管线：接入 faster-whisper、ffprobe 时长与改进日志。"""  # 文件说明。
+"""实现 Round 8 的转写管线：写入词级 JSON、保持单调性与元信息。"""  # 模块说明。
+# 导入 datetime/timezone 以记录 UTC 生成时间。
+from datetime import datetime, timezone  # noqa: F401
 # 导入 traceback 以在写 error.txt 时包含调用栈帮助排查。
-import traceback
+import traceback  # noqa: F401
 # 导入 pathlib.Path 以处理文件与目录路径。
-from pathlib import Path
-# 导入 typing.List 以描述音频文件列表类型。
-from typing import List
+from pathlib import Path  # noqa: F401
+# 导入 typing.List、Tuple 以描述音频文件列表与返回值类型。
+from typing import List, Tuple  # noqa: F401
 
 # 导入 create_transcriber 工厂以实例化指定后端。
-from src.asr.backends import create_transcriber
+from src.asr.backends import create_transcriber  # noqa: F401
 # 导入音频工具以过滤扩展名与在必要时重新探测时长。
-from src.utils.audio import is_audio_path, probe_duration
+from src.utils.audio import is_audio_path, probe_duration  # noqa: F401
 # 导入原子写入与路径相关工具，确保落盘安全。
-from src.utils.io import atomic_write_json, atomic_write_text, file_exists, path_sans_ext, safe_mkdirs
+from src.utils.io import atomic_write_json, atomic_write_text, file_exists, path_sans_ext, safe_mkdirs  # noqa: F401
 # 导入统一的日志获取函数以遵循项目日志格式。
-from src.utils.logging import get_logger
+from src.utils.logging import get_logger  # noqa: F401
 
 # 定义允许的音频扩展名列表，供扫描阶段复用。
 ALLOWED_EXTENSIONS = [".wav", ".mp3", ".m4a", ".flac"]
 # 定义词级与段级 JSON 的 schema 名称，便于下游识别版本。
 WORD_SCHEMA = "asrprogram.wordset.v1"
 SEGMENT_SCHEMA = "asrprogram.segmentset.v1"
+# 定义时间修正阈值，用于单调性检查。
+EPSILON = 1e-3
 
 
 # 定义辅助函数，用于遍历输入路径并筛选音频文件。
 def _scan_audio_inputs(root: Path) -> List[Path]:
-    """遍历输入路径并返回符合扩展名的音频文件列表。"""
+    """遍历输入路径并返回符合扩展名的音频文件列表。"""  # 函数说明。
     # 若输入路径不存在，视为致命错误，直接抛出异常。
     if not root.exists():
         raise FileNotFoundError(f"Input path does not exist: {root}")
@@ -36,6 +40,40 @@ def _scan_audio_inputs(root: Path) -> List[Path]:
         candidates = [root]
     # 使用 is_audio_path 过滤掉非音频文件，仅保留允许的扩展名。
     return [path for path in candidates if is_audio_path(path, ALLOWED_EXTENSIONS)]
+
+
+# 定义辅助函数，对词级数组执行单调性校验与必要的修正。
+def _ensure_word_monotonicity(words: List[dict]) -> Tuple[List[dict], int]:
+    """扫描词级结果，修复逆序时间并统计修复次数。"""  # 函数说明。
+    # 创建新的列表，避免直接修改输入引用。
+    fixed_words: List[dict] = []
+    # 记录发生调整的词条数量。
+    adjusted = 0
+    # 初始化上一词结束时间。
+    last_end = 0.0
+    for word in words:
+        # 拷贝词条以避免污染原数据。
+        entry = dict(word)
+        # 读取起止时间，缺失时回退到上一结束时间。
+        start = float(entry.get("start", last_end))
+        end = float(entry.get("end", start))
+        # 若起点小于上一结束时间，则将其提升并计数。
+        if start < last_end - EPSILON:
+            start = last_end
+            adjusted += 1
+        # 若终点早于起点，则拉齐到起点位置。
+        if end < start:
+            end = start
+            adjusted += 1
+        # 更新词条中的时间字段。
+        entry["start"] = start
+        entry["end"] = end
+        # 追加到修复后的列表。
+        fixed_words.append(entry)
+        # 更新上一结束时间。
+        last_end = end
+    # 返回修复后的词数组与调整次数。
+    return fixed_words, adjusted
 
 
 # 定义主运行函数，整合扫描、推理、写入与日志逻辑。
@@ -59,7 +97,7 @@ def run(
     patience: float | None = None,
     **legacy_kwargs,
 ) -> dict:
-    """执行批量音频转写并返回统计摘要。"""
+    """执行批量音频转写并返回统计摘要。"""  # 函数说明。
     # 兼容旧参数名称 write_segments，若存在则覆盖 segments_json。
     if "write_segments" in legacy_kwargs:
         segments_json = legacy_kwargs.pop("write_segments")
@@ -179,25 +217,67 @@ def run(
             # 拷贝元信息以避免在后端对象上产生副作用。
             meta = dict(transcription.get("meta", {}))
             meta.setdefault("duration_source", duration_source)
-            meta.setdefault("schema_version", "round7")
-            # 组装词级 JSON 结构，words 数组允许为空。
+            meta.setdefault("schema_version", "round8")
+            # 读取语言与后端信息，保持向后兼容。
+            resolved_language = transcription.get("language", language)
+            backend_info = transcription.get("backend", {"name": backend_name})
+            # 拷贝段级数组，确保后续调整不会影响原始引用。
+            segments_data = []
+            for segment in transcription.get("segments", []):
+                segment_copy = dict(segment)
+                segment_copy["words"] = [dict(word) for word in segment_copy.get("words", [])]
+                segments_data.append(segment_copy)
+            # 从后端获取词数组，并执行单调性检查。
+            raw_words = [dict(word) for word in transcription.get("words", [])]
+            fixed_words, adjustments = _ensure_word_monotonicity(raw_words)
+            if adjustments and verbose:
+                logger.warning("Adjusted %d word timestamps for %s", adjustments, audio_file)
+            # 将调整统计写回元信息，便于排查。
+            if adjustments:
+                meta.setdefault("postprocess", {})
+                meta["postprocess"].setdefault("word_monotonicity_fixes", adjustments)
+            # 根据修正后的词重新整理段内结构，确保 words.json 与 segments.json 对齐。
+            segment_lookup = {segment.get("id"): segment for segment in segments_data}
+            for segment in segments_data:
+                segment["words"] = []
+            for word in fixed_words:
+                segment = segment_lookup.get(word.get("segment_id"))
+                if segment is None:
+                    continue
+                segment["words"].append(word)
+            for segment in segments_data:
+                confidences = [w.get("confidence") for w in segment.get("words", []) if w.get("confidence") is not None]
+                if confidences:
+                    segment["avg_conf"] = sum(confidences) / len(confidences)
+            # 组装词级 JSON 结构，包含音频、后端与生成时间。
+            generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
             words_payload = {
                 "schema": WORD_SCHEMA,
-                "language": transcription.get("language", language),
-                "duration_sec": duration,
-                "backend": transcription.get("backend", {"name": backend_name}),
+                "language": resolved_language,
+                "audio": {
+                    "path": str(audio_file),
+                    "duration_sec": duration,
+                    "language": resolved_language,
+                },
+                "backend": backend_info,
                 "meta": meta,
-                "words": transcription.get("words", []),
+                "words": fixed_words,
+                "generated_at": generated_at,
             }
-            # 如需输出段级 JSON，则构造相应结构。
+            # 如需输出段级 JSON，则构造相应结构并嵌入最新词数组。
             if segments_json:
                 segments_payload = {
                     "schema": SEGMENT_SCHEMA,
-                    "language": transcription.get("language", language),
-                    "duration_sec": duration,
-                    "backend": transcription.get("backend", {"name": backend_name}),
+                    "language": resolved_language,
+                    "audio": {
+                        "path": str(audio_file),
+                        "duration_sec": duration,
+                        "language": resolved_language,
+                    },
+                    "backend": backend_info,
                     "meta": meta,
-                    "segments": transcription.get("segments", []),
+                    "segments": segments_data,
+                    "generated_at": generated_at,
                 }
             # 写入前清理可能存在的旧错误文件。
             error_path.unlink(missing_ok=True)

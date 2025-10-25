@@ -292,6 +292,72 @@ Round 7/8 将让 faster-whisper 产生真实的转写结果，并在 JSON 输出
 
 对应的 `words.json` 会包含相同的 `backend`/`meta` 信息，仅 `words` 数组为空，为 Round 8 的逐词输出预留结构。
 
+## Round 8：词级时间戳（Word Timestamps）
+本轮在 faster-whisper 后端中启用了 `word_timestamps=True`，并实现了跨语言的逐词输出：
+
+- `<name>.words.json` 现在携带真实的 `words` 数组，每个元素包含 `text/start/end/confidence/segment_id/index`。
+- `<name>.segments.json` 的 `segments[*].words` 字段与词级结果同步，便于对照段落与词汇。
+- 为中文、日文等无空格语言提供降级切分：当后端缺失词级信息时，会按照字符/长度比例划分段内时间。
+- 对置信度字段执行兜底：优先使用词级概率，其次回退到段级平均值，最后置为 `null`。
+- 所有时间戳经过单调性修正，确保 `start <= end` 且跨词递增；修正次数会写入 `meta.postprocess.word_monotonicity_fixes`。
+
+### 运行命令
+`word_timestamps` 默认开启，可直接复用上一轮的命令：
+
+```bash
+python -m src.cli.main \
+  --input ./samples \
+  --backend faster-whisper \
+  --language auto \
+  --segments-json true \
+  --verbose
+```
+
+### words.json 结构示例
+生成的 `out/sample.words.json` 片段如下（仅展示前 6 个词条）：
+
+```json
+{
+  "schema": "asrprogram.wordset.v1",
+  "audio": {
+    "path": "./samples/jp.wav",
+    "duration_sec": 12.34,
+    "language": "ja"
+  },
+  "backend": {
+    "name": "faster-whisper",
+    "model": "medium",
+    "version": "1.0.3"
+  },
+  "words": [
+    {"text": "これ", "start": 0.00, "end": 0.42, "confidence": 0.88, "segment_id": 0, "index": 0},
+    {"text": "は", "start": 0.42, "end": 0.63, "confidence": 0.91, "segment_id": 0, "index": 1},
+    {"text": "サンプル", "start": 0.63, "end": 1.24, "confidence": 0.87, "segment_id": 0, "index": 2},
+    {"text": "音声", "start": 1.24, "end": 1.78, "confidence": 0.84, "segment_id": 0, "index": 3},
+    {"text": "です", "start": 1.78, "end": 2.21, "confidence": 0.83, "segment_id": 0, "index": 4},
+    {"text": "。", "start": 2.21, "end": 2.21, "confidence": 0.65, "segment_id": 0, "index": 5}
+  ],
+  "generated_at": "2025-01-01T12:34:56Z"
+}
+```
+
+### 语言与标点策略
+- **英文及其他空格语言**：优先使用后端返回的词数组；若缺失则按空格切分，保留连字符与撇号。
+- **中文/日文/韩文**：若后端无词级结果，则按字符拆分，同时合并连续的拉丁字母或数字，利用段长按比例分配时间。
+- **标点处理**：当 faster-whisper 将标点单独返回时直接保留；若并入词内部，时间戳仍沿用模型给出的边界。
+
+### 置信度与降级说明
+- 首选 `word.probability`，该值通常介于 0 与 1 之间。
+- 若缺失，则使用段级 `avg_logprob` 的指数转换作为近似。
+- 仍缺失时将 `confidence` 置为 `null`，以便下游进行后续推断或忽略。
+- 降级切分采用线性插值，无法保证与真实对齐完全一致；建议结合 VAD 或外部对齐器进一步优化。
+
+### 验证与排错
+- `words` 数组为空：检查 `scripts/verify_env.py` 输出中关于 `word_timestamps` 的提示，确认 faster-whisper 版本 ≥ 0.9 且模型支持词级输出。
+- 时间戳出现逆序：在 `--verbose` 模式下查看 warning，同时检查 `words.json` 中 `meta.postprocess.word_monotonicity_fixes` 的值。
+- 中文/日文词粒度过粗：这是降级策略的限制，可在后续集成更精细的分词器（如 MeCab、Jieba）或启用额外对齐工具。
+- 再次运行 `python scripts/verify_env.py` 可看到 Round 8 增加的 `word_timestamps` 支持检测。
+
 ### 常用参数与调优建议
 - `--model`：可选择 `tiny`/`base`/`small`/`medium`/`large-v3`，模型越大准确率越高、资源占用越大。
 - `--compute-type`：
