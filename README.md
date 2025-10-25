@@ -1,13 +1,12 @@
-# ASRProgram
-
 ## 项目简介
-ASRProgram 是一个演示性项目，用于将输入音频文件的元信息转化为词级和段级 JSON 结构；在 Round 1 中，所有识别结果均由占位逻辑生成，仅用于打通扫描输入、模拟转写与落盘的完整流程。
+ASRProgram 是一个演示性项目，用于将输入音频文件的元信息转化为词级和段级 JSON 结构；在 Round 3 中，新增统一的后端接口
+与 faster-whisper 占位实现，所有识别结果依旧由模拟逻辑生成，仅用于打通扫描输入、模拟转写与落盘的完整流程。
 
 ## 快速开始
 1. **创建虚拟环境**
    ```bash
    python -m venv .venv
-   source .venv/bin/activate  # Windows PowerShell 使用 .venv\\Scripts\\Activate.ps1
+   source .venv/bin/activate  # Windows PowerShell 使用 .venv\Scripts\Activate.ps1
    ```
 2. **安装依赖**
    ```bash
@@ -25,14 +24,14 @@ ASRProgram 是一个演示性项目，用于将输入音频文件的元信息转
    ```bash
    python -m src.cli.main --input ./samples --dry-run true --verbose
    ```
-6. **正常运行（目录扫描，dummy 占位生成）**
+6. **正常运行（目录扫描，占位生成）**
    ```bash
    python -m src.cli.main --input ./samples --out-dir ./out --backend dummy --segments-json true
    ```
 
-
 ## 一键安装与环境自检（Round 2）
-本轮新增的 `scripts/setup.sh` 与 `scripts/setup.ps1` 均为**演练模式**脚本：无论 `--check-only` 取值为何，都只会打印未来计划，不会创建虚拟环境、安装依赖或下载模型。脚本末尾会真实执行 `scripts/verify_env.py`，输出当前环境体检报告。
+本轮新增的 `scripts/setup.sh` 与 `scripts/setup.ps1` 均为**演练模式**脚本：无论 `--check-only` 取值为何，都只会打印未来计划，不会
+创建虚拟环境、安装依赖或下载模型。脚本末尾会真实执行 `scripts/verify_env.py`，输出当前环境体检报告。
 
 ### 参数总览
 | 参数 | 默认值 | 适用脚本 | 说明 |
@@ -69,6 +68,32 @@ Python 解释器: /usr/bin/python3
 
 > **提示**：Round 5 才会启用真实安装、模型下载与按平台分流的 `ffmpeg` 获取策略；当前轮次仅做准备与环境评估。
 
+## 后端架构与 Round 3 说明
+Round 3 引入统一接口 `ITranscriber`，所有后端在构造时接受 `model`、`language` 与任意扩展参数，并实现 `transcribe_file` 方法返
+回标准化的段级结构。`src/asr/backends/__init__.py` 维护了名称到实现的注册表，并提供 `create_transcriber` 工厂函数，未来新增的
+`whisper.cpp` 等后端只需在该字典中注册即可。
+
+当前注册的后端：
+- **dummy**：沿用之前的占位实现，根据文件名生成词级与段级伪数据。
+- **faster-whisper**：全新占位实现，不导入真实库，仅校验输入路径与扩展名，返回单段结果，`words` 暂为空数组，并在元信息中说明
+  Round 7/8 才会启用真实推理与词级时间戳。
+
+管线 `src/asr/pipeline.py` 通过工厂创建后端，逐文件调用 `transcribe_file` 并落盘：
+- `<name>.segments.json`：包含语言、占位时长、后端信息、meta 扩展与段级数组。
+- `<name>.words.json`：保留同样的顶层信息，`words` 数组在 faster-whisper 占位实现中为空，为未来词级时间戳预留结构。
+- 若单个文件失败，会生成 `<name>.error.txt` 保存错误详情，其他文件继续处理。
+
+CLI 在 Round 3 中新增了对 `--backend` 的枚举校验，可在 verbose 模式下打印已选择的后端与语言配置。示例命令：
+```bash
+# 使用 dummy 后端（占位）
+python -m src.cli.main --input ./samples --backend dummy --out-dir ./out --verbose
+
+# 使用占位 faster-whisper 后端（不做真实识别）
+python -m src.cli.main --input ./samples --backend faster-whisper --out-dir ./out --verbose
+
+# 查看测试
+pytest -q
+```
 
 ## 目录结构
 ```
@@ -90,7 +115,8 @@ ASRProgram/
 │   │   └── backends/
 │   │       ├── __init__.py    # 后端注册表
 │   │       ├── base.py        # 转写接口定义
-│   │       └── dummy.py       # Dummy 占位实现
+│   │       ├── dummy.py       # Dummy 占位实现
+│   │       └── faster_whisper_backend.py  # faster-whisper 占位实现
 │   ├── cli/
 │   │   └── main.py            # CLI 入口
 │   └── utils/
@@ -98,7 +124,8 @@ ASRProgram/
 │       ├── io.py              # 原子写入与 JSON 工具
 │       └── logging.py         # 日志配置工具
 ├── tests/
-│   └── test_dummy_backend.py  # pytest 用例
+│   ├── test_backend_interface.py  # 验证统一接口结构
+│   └── test_dummy_backend.py      # dummy 后端端到端测试
 └── out/
     └── .gitkeep               # 输出目录占位，保持版本控制
 ```
@@ -108,7 +135,7 @@ ASRProgram/
 | --- | --- | --- |
 | `--input` | 必填 | 单个音频文件或包含音频文件的目录，支持扩展名 `.wav,.mp3,.m4a,.flac` |
 | `--out-dir` | `out` | 输出 JSON 文件所在目录 |
-| `--backend` | `dummy` | 指定使用的转写后端，本轮仅提供 `dummy` |
+| `--backend` | `dummy` | 指定使用的转写后端，当前提供 `dummy` 与 `faster-whisper` 两种占位实现 |
 | `--language` | `auto` | 转写语言占位信息，会写入输出 JSON |
 | `--segments-json` | `true` | 是否写出段级 JSON 文件 |
 | `--overwrite` | `false` | 是否覆盖已有输出文件 |
@@ -120,13 +147,15 @@ ASRProgram/
 `words.json` 片段：
 ```json
 {
-  "metadata": {
-    "language": "auto",
-    "duration_sec": 0.0,
-    "backend": {
-      "name": "dummy",
-      "version": "0.1.0"
-    },
+  "language": "auto",
+  "duration_sec": 0.0,
+  "backend": {
+    "name": "dummy",
+    "version": "0.1.0",
+    "model": "synthetic"
+  },
+  "meta": {
+    "note": "placeholder for round 3",
     "generated_at": "2024-01-01T00:00:00Z"
   },
   "words": [
@@ -145,13 +174,15 @@ ASRProgram/
 `segments.json` 片段：
 ```json
 {
-  "metadata": {
-    "language": "auto",
-    "duration_sec": 0.0,
-    "backend": {
-      "name": "dummy",
-      "version": "0.1.0"
-    },
+  "language": "auto",
+  "duration_sec": 0.0,
+  "backend": {
+    "name": "dummy",
+    "version": "0.1.0",
+    "model": "synthetic"
+  },
+  "meta": {
+    "note": "placeholder for round 3",
     "generated_at": "2024-01-01T00:00:00Z"
   },
   "segments": [
@@ -181,12 +212,11 @@ ASRProgram/
 * 所有脚本与源码均为纯文本，严禁提交二进制文件或模型权重。
 
 ## 常见问题
-1. **为何输出为占位文本？** Round 1 仅构建端到端骨架，后续轮次才会集成真实 ASR 模型。
-2. **可以更换后端吗？** 当前仅提供 `dummy`，后续可按照 `ITranscriber` 接口扩展。
+1. **为何输出为占位文本？** Round 3 仍在搭建骨架，后续轮次才会集成真实 ASR 模型。
+2. **可以更换后端吗？** 当前提供 `dummy` 与 `faster-whisper` 占位实现，可按照 `ITranscriber` 接口扩展更多后端。
 3. **输出文件是否可覆盖？** 默认不会覆盖，可通过 `--overwrite true` 开启。
 
 ## 后续计划
-* Round 2 起将增加更完整的环境自检与依赖安装脚本。
-* Round 5 计划接入真实音频探测工具（例如 `ffprobe`）。
-* Round 7/8 目标接入 faster-whisper 并提供真实的词级时间戳。
-
+* Round 5 起增加更完整的环境自检与依赖安装脚本。
+* Round 7/8 目标接入 faster-whisper 的真实推理与词级时间戳。
+* Round 9 探索多进程/多线程并发处理。

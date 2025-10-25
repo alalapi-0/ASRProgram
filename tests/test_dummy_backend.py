@@ -43,9 +43,12 @@ def test_dummy_backend_generates_outputs(tmp_path):
     assert segments_path.exists()
     # 读取词级文件并验证关键字段。
     words_data = json.loads(words_path.read_text(encoding="utf-8"))
-    assert "metadata" in words_data
-    assert "words" in words_data
+    assert words_data["language"] == "auto"
+    assert isinstance(words_data["backend"], dict)
+    assert isinstance(words_data["words"], list)
     # 读取段级文件并验证关键字段。
     segments_data = json.loads(segments_path.read_text(encoding="utf-8"))
-    assert "metadata" in segments_data
-    assert "segments" in segments_data
+    assert segments_data["language"] == "auto"
+    assert isinstance(segments_data["segments"], list)
+    assert segments_data["backend"]["name"] == "dummy"
+
