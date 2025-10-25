@@ -1,0 +1,10 @@
+# 默认配置文件，展示 CLI 参数的典型取值。
+input: ./samples
+out_dir: ./out
+backend: dummy
+language: auto
+segments_json: true
+overwrite: false
+num_workers: 1
+dry_run: false
+verbose: false
