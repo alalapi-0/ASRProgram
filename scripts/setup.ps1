@@ -10,6 +10,10 @@ $PythonPath = ''  # 初始化 Python 可执行文件路径，由脚本自动探�
 $UseSystemFfmpeg = 'true'  # 默认优先使用系统级 ffmpeg/ffprobe。
 $CacheDir = $DefaultCacheDir  # 当前缓存目录，初始为默认值。
 $VenvDir = $DefaultVenvDir  # 当前虚拟环境目录，初始为默认值。
+$ModelBackend = 'faster-whisper'  # 模型下载后端默认 faster-whisper。
+$ModelName = 'medium'  # 模型规格默认 medium。
+$DefaultModelsDir = Join-Path $HOME '.cache/asrprogram/models'  # 默认模型缓存目录。
+$ModelsDir = $DefaultModelsDir  # 当前模型缓存目录，初始为默认值。
 $ExtraIndexUrl = ''  # 允许用户指定额外的 pip 索引。
 $RequirementsFile = Join-Path $RepoRoot 'requirements.txt'  # 指定依赖清单文件路径。
 function Show-Help {  # 定义函数输出脚本帮助信息。
@@ -19,6 +23,9 @@ function Show-Help {  # 定义函数输出脚本帮助信息。
     Write-Host '  -use-system-ffmpeg true|false 是否优先使用系统 ffmpeg/ffprobe，默认 true。'  # 说明 ffmpeg 策略。
     Write-Host '  -cache-dir <path>             指定缓存目录，默认为仓库下 .cache。'  # 说明缓存目录。
     Write-Host '  -venv-dir <path>              指定虚拟环境目录，默认为仓库下 .venv。'  # 说明虚拟环境目录。
+    Write-Host '  -backend <name>               指定模型下载后端，默认 faster-whisper。'  # 说明模型后端参数。
+    Write-Host '  -model <name>                 指定模型规格，默认 medium。'  # 说明模型规格参数。
+    Write-Host '  -models-dir <path>            指定模型缓存目录，默认 ~/.cache/asrprogram/models。'  # 说明模型目录参数。
     Write-Host '  -extra-index-url <url>        为 pip 安装追加索引源。'  # 说明额外索引参数。
     Write-Host '  -help                         查看帮助信息并退出。'  # 说明帮助参数。
 }  # 结束帮助函数定义。
@@ -55,6 +62,24 @@ for ($i = 0; $i -lt $args.Length; $i++) {  # 使用循环逐项解析用户输�
                 $i++  # 跳过值。
             }
         }
+        '-backend' {  # 解析 -backend 参数。
+            if ($i + 1 -lt $args.Length) {  # 校验值是否存在。
+                $ModelBackend = $args[$i + 1]  # 记录模型后端。
+                $i++  # 跳过值。
+            }
+        }
+        '-model' {  # 解析 -model 参数。
+            if ($i + 1 -lt $args.Length) {  # 校验值是否存在。
+                $ModelName = $args[$i + 1]  # 记录模型规格。
+                $i++  # 跳过值。
+            }
+        }
+        '-models-dir' {  # 解析 -models-dir 参数。
+            if ($i + 1 -lt $args.Length) {  # 校验值是否存在。
+                $ModelsDir = $args[$i + 1]  # 记录模型目录。
+                $i++  # 跳过值。
+            }
+        }
         '-extra-index-url' {  # 解析 -extra-index-url 参数。
             if ($i + 1 -lt $args.Length) {  # 校验值是否存在。
                 $ExtraIndexUrl = $args[$i + 1]  # 记录额外索引地址。
@@ -76,6 +101,9 @@ Write-Host ("python              : {0}" -f (if ($PythonPath) { $PythonPath } els
 Write-Host "use-system-ffmpeg   : $UseSystemFfmpeg"  # 展示 ffmpeg 策略。
 Write-Host "cache-dir           : $CacheDir"  # 展示缓存目录。
 Write-Host "venv-dir            : $VenvDir"  # 展示虚拟环境目录。
+Write-Host "backend             : $ModelBackend"  # 展示模型后端。
+Write-Host "model               : $ModelName"  # 展示模型规格。
+Write-Host "models-dir          : $ModelsDir"  # 展示模型目录。
 Write-Host ("extra-index-url     : {0}" -f (if ($ExtraIndexUrl) { $ExtraIndexUrl } else { '<未指定>' }))  # 展示额外索引。
 Write-Host "仓库根目录          : $RepoRoot"  # 展示仓库根目录。
 Write-Host ''  # 输出空行便于阅读。
@@ -126,7 +154,11 @@ function Ensure-Directory {  # 定义函数确保目录存在。
 }  # 结束目录创建函数。
 function Run-Verify {  # 定义函数执行 verify_env.py 脚本。
     param([string]$PythonExecutable)  # 声明 Python 路径参数。
-    & $PythonExecutable (Join-Path $ScriptDir 'verify_env.py')  # 调用验证脚本。
+    & $PythonExecutable (Join-Path $ScriptDir 'verify_env.py') `  # 调用验证脚本并传参。
+        --backend $ModelBackend `  # 传入后端参数。
+        --model $ModelName `  # 传入模型规格。
+        --models-dir $ModelsDir `  # 传入模型目录。
+        --cache-dir $CacheDir  # 传入缓存目录。
 }  # 结束体检函数。
 function Invoke-Pip {  # 定义函数封装 python -m pip 调用。
     param(  # 声明参数块。
@@ -384,6 +416,29 @@ function Main {  # 定义主函数组织整体流程。
     } catch {
         Write-Host "[WARN] 自动准备 ffmpeg 失败：$($_.Exception.Message)"  # 输出警告。
         Write-Host '[HINT] 请参考 README Round 5 章节手动安装 ffmpeg/ffprobe。'  # 提供建议。
+    }
+    Write-Host '[INFO] 准备执行模型下载流程。'  # 提示即将调用模型下载脚本。
+    $downloadScript = Join-Path $ScriptDir 'download_model.py'  # 计算模型下载脚本路径。
+    $downloadArgs = @('--backend', $ModelBackend, '--model', $ModelName, '--cache-dir', $CacheDir)  # 构建基础参数数组。
+    if ($ModelsDir) {  # 若模型目录参数非空。
+        $downloadArgs += @('--models-dir', $ModelsDir)  # 将模型目录追加到参数中。
+    }
+    $displayArgs = $downloadArgs -join ' '  # 组装用于展示的参数字符串。
+    Write-Host "[INFO] 调用模型下载器：$venvPython $downloadScript $displayArgs"  # 打印即将执行的命令。
+    $downloadOutput = & $venvPython $downloadScript @downloadArgs 2>&1  # 执行模型下载脚本并捕获输出。
+    $downloadExit = $LASTEXITCODE  # 记录退出码。
+    if ($downloadOutput) {  # 若脚本产生输出。
+        ($downloadOutput -split "`n") | ForEach-Object { Write-Host $_ }  # 逐行回显日志。
+    }
+    if ($downloadExit -eq 0 -and $downloadOutput) {  # 成功且有输出时。
+        $downloadLines = $downloadOutput -split "`n"  # 将输出拆分成数组。
+        $downloadJsonCandidates = $downloadLines | Where-Object { $_.Trim().Length -gt 0 }  # 过滤出非空行。
+        if ($downloadJsonCandidates.Count -gt 0) {  # 若存在非空行。
+            $downloadJson = $downloadJsonCandidates[$downloadJsonCandidates.Count - 1]  # 获取最后一个非空行作为 JSON。
+            Write-Host "[INFO] 模型下载结果 JSON：$downloadJson"  # 打印 JSON 结果。
+        }
+    } elseif ($downloadExit -ne 0) {  # 当退出码非零时。
+        Write-Host "[WARN] 模型下载脚本退出码为 $downloadExit，请稍后重试或参考 README 手动准备模型。"  # 提示后续步骤。
     }
     Write-Host '[INFO] 开始运行 verify_env.py 进行最终体检。'  # 提示接下来执行体检。
     Run-Verify -PythonExecutable $venvPython  # 使用虚拟环境 Python 执行体检。

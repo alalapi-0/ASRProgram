@@ -10,6 +10,10 @@ PYTHON_PATH=""  # 记录用户指定的 Python 可执行路径，默认留空表
 USE_SYSTEM_FFMPEG="true"  # 默认尝试使用系统级 ffmpeg/ffprobe。
 CACHE_DIR="${DEFAULT_CACHE_DIR}"  # 初始化缓存目录变量。
 VENV_DIR="${DEFAULT_VENV_DIR}"  # 初始化虚拟环境目录变量。
+MODEL_BACKEND="faster-whisper"  # 模型下载所用后端默认 faster-whisper。
+MODEL_NAME="medium"  # 模型规格默认 medium。
+DEFAULT_MODELS_DIR="${HOME}/.cache/asrprogram/models"  # 模型默认缓存目录。
+MODELS_DIR="${DEFAULT_MODELS_DIR}"  # 初始化模型目录变量。
 EXTRA_INDEX_URL=""  # 允许用户自定义 pip 镜像。
 REQUIREMENTS_FILE="${REPO_ROOT}/requirements.txt"  # 指定依赖清单文件。
 FFMPEG_CACHE_ROOT=""  # 预留变量用于记录 ffmpeg 下载目录。
@@ -22,6 +26,9 @@ print_help() {  # 定义帮助函数输出脚本参数说明。
   --use-system-ffmpeg true|false 是否优先使用系统已安装的 ffmpeg/ffprobe（默认 true）。
   --cache-dir PATH               指定缓存目录，默认仓库根目录下的 .cache。
   --venv-dir PATH                指定虚拟环境目录，默认仓库根目录下的 .venv。
+  --backend NAME                 指定模型下载后端，默认 faster-whisper。
+  --model NAME                   指定模型规格，默认 medium。
+  --models-dir PATH              指定模型缓存目录，默认 ~/.cache/asrprogram/models。
   --extra-index-url URL          为 pip 安装追加额外的索引源。
   --help                         查看帮助信息并退出。
 USAGE
@@ -47,6 +54,18 @@ while [[ $# -gt 0 ]]; do  # 开始解析命令行参数。
     --venv-dir)  # 捕获 --venv-dir 参数。
       VENV_DIR="$2"  # 覆盖默认虚拟环境路径。
       shift 2  # 跳过该参数及其取值。
+      ;;
+    --backend)  # 捕获 --backend 参数。
+      MODEL_BACKEND="$2"  # 更新模型下载后端。
+      shift 2  # 跳过该参数及其值。
+      ;;
+    --model)  # 捕获 --model 参数。
+      MODEL_NAME="$2"  # 更新模型规格。
+      shift 2  # 跳过该参数及其值。
+      ;;
+    --models-dir)  # 捕获 --models-dir 参数。
+      MODELS_DIR="$2"  # 更新模型缓存目录。
+      shift 2  # 跳过该参数及其值。
       ;;
     --extra-index-url)  # 捕获 --extra-index-url 参数。
       EXTRA_INDEX_URL="$2"  # 保存额外的 pip 索引地址。
@@ -84,6 +103,9 @@ print_parameters() {  # 定义函数打印解析后的参数信息。
   echo "use-system-ffmpeg   : ${USE_SYSTEM_FFMPEG}"  # 显示 ffmpeg 使用策略。
   echo "cache-dir           : ${CACHE_DIR}"  # 显示缓存目录。
   echo "venv-dir            : ${VENV_DIR}"  # 显示虚拟环境目录。
+  echo "backend             : ${MODEL_BACKEND}"  # 显示模型后端。
+  echo "model               : ${MODEL_NAME}"  # 显示模型规格。
+  echo "models-dir          : ${MODELS_DIR}"  # 显示模型缓存目录。
   echo "extra-index-url     : ${EXTRA_INDEX_URL:-<未指定>}"  # 显示额外 pip 索引。
   echo "仓库根目录          : ${REPO_ROOT}"  # 显示仓库根目录路径。
   echo  # 输出空行分隔。
@@ -104,7 +126,11 @@ ensure_directory() {  # 定义函数用于创建目录。
 }  # 结束目录创建函数。
 run_verify() {  # 定义函数执行环境体检脚本。
   local python_exec="$1"  # 接收用于运行体检的 Python 解释器。
-  "${python_exec}" "${SCRIPT_DIR}/verify_env.py"  # 调用 verify_env.py 输出体检结果。
+  "${python_exec}" "${SCRIPT_DIR}/verify_env.py" \
+    --backend "${MODEL_BACKEND}" \
+    --model "${MODEL_NAME}" \
+    --models-dir "${MODELS_DIR}" \
+    --cache-dir "${CACHE_DIR}"  # 调用体检脚本并传入模型相关参数。
 }  # 结束体检函数。
 install_python_requirements() {  # 定义函数安装 Python 依赖。
   local python_exec="$1"  # 接收虚拟环境中的 Python。
@@ -352,6 +378,22 @@ main() {  # 定义主流程函数。
   if ! prepare_ffmpeg "${platform}" "${FFMPEG_CACHE_ROOT}"; then  # 调用函数确保 ffmpeg 可用。
     echo "[WARN] 自动准备 ffmpeg 失败，请参阅 README 手动安装。"  # 输出警告但不中断流程。
   fi  # ffmpeg 准备完成或失败。
+  echo "[INFO] 准备执行模型下载流程。"  # 提示即将下载模型。
+  local download_cmd=("${venv_python}" "${SCRIPT_DIR}/download_model.py" "--backend" "${MODEL_BACKEND}" "--model" "${MODEL_NAME}" "--cache-dir" "${CACHE_DIR}")  # 构造模型下载命令数组。
+  if [[ -n "${MODELS_DIR}" ]]; then  # 若用户指定模型目录。
+    download_cmd+=("--models-dir" "${MODELS_DIR}")  # 将目录参数加入命令。
+  fi  # 结束目录判断。
+  echo "[INFO] 调用模型下载器：${download_cmd[*]}"  # 打印命令以便调试。
+  local download_output=""  # 预留变量存储下载输出。
+  if download_output=$("${download_cmd[@]}" 2>&1); then  # 执行模型下载器并捕获输出。
+    echo "${download_output}"  # 将下载器的日志原样输出给用户。
+    local download_json="$(echo "${download_output}" | awk 'NF{line=$0} END{print line}')"  # 提取最后一个非空行作为 JSON 信息。
+    echo "[INFO] 模型下载结果 JSON：${download_json}"  # 打印 JSON 行，方便用户确认路径。
+  else  # 当下载脚本返回非零状态时。
+    local download_status=$?  # 记录退出码。
+    echo "${download_output}"  # 输出脚本日志。
+    echo "[WARN] 模型下载脚本退出码为 ${download_status}，请稍后重试或按 README 手动准备模型。"  # 提示用户可选操作。
+  fi  # 下载流程结束。
   echo "[INFO] 开始运行 verify_env.py 进行最终体检。"  # 提示即将执行环境检查。
   run_verify "${venv_python}"  # 使用虚拟环境解释器运行体检。
   echo  # 输出空行提升可读性。

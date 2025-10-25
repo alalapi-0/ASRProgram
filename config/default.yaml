@@ -1,10 +1,22 @@
-# 默认配置文件，展示 CLI 参数的典型取值。
-input: ./samples
-out_dir: ./out
-backend: dummy
-language: auto
-segments_json: true
-overwrite: false
-num_workers: 1
-dry_run: false
-verbose: false
+# 默认配置文件，展示 CLI 参数的典型取值。  # 对整个文件的说明。
+input: ./samples  # 输入音频目录默认指向 samples。
+out_dir: ./out  # 转写输出目录默认位于仓库内的 out。
+backend_cli_default: dummy  # CLI 层的默认后端保持 dummy 以兼容早期轮次。
+language: auto  # 默认自动检测语言。
+segments_json: true  # 默认导出段级 JSON。
+overwrite: false  # 默认不覆盖已有结果。
+num_workers: 1  # 默认使用单线程处理。
+dry_run: false  # 默认真实落盘。
+verbose: false  # 默认关闭详细日志。
+backend:  # 后端下载相关默认值聚合于此字典。
+  default: faster-whisper  # 推荐的真实后端为 faster-whisper。
+model:  # 模型配置相关键集合。
+  default: medium  # 默认下载 medium 规格，可选 tiny|base|small|medium|large-v3。
+cache_dir: .cache/  # 仓库内缓存目录默认指向 .cache/，可被脚本覆盖。
+models_dir: ~/.cache/asrprogram/models/  # 默认将模型缓存在用户目录下的专用路径。
+download:  # 下载相关默认参数集合。
+  mirrors:  # 下载镜像列表，脚本会按顺序依次尝试。
+    - https://huggingface.co  # 官方主仓库，提供最新模型文件。
+    - https://hf-mirror.com  # 备用镜像，适合部分地区加速访问。
+  timeout_sec: 60  # 单次网络请求的默认超时时长（秒）。
+  retries: 3  # 每个文件的最大重试次数。
