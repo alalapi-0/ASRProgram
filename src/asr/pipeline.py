@@ -1,150 +1,177 @@
-"""实现扫描输入、调用后端与写出结果的核心流程。"""
-# 导入 pathlib.Path 处理路径。
+"""实现 Round 4 规范化的扫描与落盘管线。"""
+# 导入 traceback 以在错误旁路时记录调用栈。
+import traceback
+# 导入 pathlib.Path 处理输入与输出路径。
 from pathlib import Path
-# 导入 typing 模块以提供类型注释。
-from typing import Dict, List
-# 导入后端注册表工厂函数。
-from .backends import create_transcriber
-# 导入音频工具以获取占位时长。
-from src.utils.audio import probe_duration
-# 导入 IO 工具以执行原子写入。
-from src.utils.io import ensure_directory, write_json_atomic, atomic_write_text
-# 导入日志工具以输出调试信息。
+# 导入 typing.List 以对文件列表进行类型注释。
+from typing import List
+# 导入后端工厂以实例化占位转写器。
+from src.asr.backends import create_transcriber
+# 导入音频工具函数用于过滤文件与占位时长。
+from src.utils.audio import is_audio_path, probe_duration
+# 导入 IO 工具以进行目录创建、原子写入及辅助判断。
+from src.utils.io import atomic_write_json, atomic_write_text, file_exists, path_sans_ext, safe_mkdirs
+# 导入日志工具获取统一格式的日志器。
 from src.utils.logging import get_logger
 
-# 定义允许扫描的音频扩展名集合。
-SUPPORTED_EXTENSIONS = {".wav", ".mp3", ".m4a", ".flac"}
+# 定义允许的音频扩展名列表，便于在扫描阶段复用。
+ALLOWED_EXTENSIONS = [".wav", ".mp3", ".m4a", ".flac"]
 
-# 定义运行结果的返回类型别名。
-PipelineResult = Dict[str, List[Dict[str, str]]]
+# 定义辅助函数，负责根据输入路径收集所有待处理的音频文件。
+def _scan_audio_inputs(root: Path) -> List[Path]:
+    """遍历输入路径，返回符合扩展名要求的音频文件列表。"""
+    # 如果路径不存在，直接抛出异常交由调用者处理（被视为致命错误）。
+    if not root.exists():
+        raise FileNotFoundError(f"Input path does not exist: {root}")
+    # 如果是目录则递归遍历其下文件。
+    if root.is_dir():
+        # 使用 rglob 遍历全部文件，并按路径排序保证输出稳定。
+        candidates = sorted(path for path in root.rglob("*") if path.is_file())
+    else:
+        # 若为单个文件则直接放入列表以统一处理。
+        candidates = [root]
+    # 使用音频工具函数过滤，确保只保留允许的扩展名。
+    return [path for path in candidates if is_audio_path(path, ALLOWED_EXTENSIONS)]
 
-# 定义辅助函数，收集输入路径下的所有音频文件。
-def collect_input_files(input_path: Path) -> List[Path]:
-    """根据输入路径收集所有符合扩展名的音频文件。"""
-    # 如果给定路径是目录，则递归遍历。
-    if input_path.is_dir():
-        # 使用 rglob 遍历所有文件。
-        return [
-            path
-            for path in input_path.rglob("*")
-            if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS
-        ]
-    # 如果是文件且扩展名匹配，则返回单元素列表。
-    if input_path.is_file() and input_path.suffix.lower() in SUPPORTED_EXTENSIONS:
-        return [input_path]
-    # 其他情况返回空列表，表示未找到有效文件。
-    return []
-
-# 定义主运行函数，封装整个转写流程。
+# 定义主运行函数，负责 orchestrate 扫描、转写、落盘与汇总。
 def run(
-    input_path: Path,
-    out_dir: Path,
+    input_path: str,
+    out_dir: str,
     backend_name: str,
-    language: str,
-    write_segments: bool,
-    overwrite: bool,
-    num_workers: int,
-    dry_run: bool,
-    verbose: bool,
-) -> PipelineResult:
-    """执行转写管线并返回处理结果摘要。"""
-    # 获取日志器以便输出运行信息。
+    language: str = "auto",
+    segments_json: bool = True,
+    overwrite: bool = False,
+    dry_run: bool = False,
+    verbose: bool = False,
+    **legacy_kwargs,
+) -> dict:
+    """执行音频转写流程并返回统计汇总。"""
+    # 兼容早期调用方使用的参数名称，例如 write_segments 与 num_workers。
+    if "write_segments" in legacy_kwargs:
+        segments_json = legacy_kwargs.pop("write_segments")
+    # num_workers 在占位实现中未使用，仅为保持兼容而丢弃。
+    legacy_kwargs.pop("num_workers", None)
+    # 如果仍存在未知的关键字参数，则提示调用者以避免静默忽略潜在配置。
+    if legacy_kwargs:
+        unsupported = ", ".join(sorted(legacy_kwargs.keys()))
+        raise TypeError(f"Unsupported arguments for pipeline.run: {unsupported}")
+    # 获取日志器并根据 verbose 设置级别。
     logger = get_logger(verbose)
-    # 输出即将使用的参数信息。
-    logger.debug(
-        "Pipeline configuration: input=%s, out_dir=%s, backend=%s, language=%s, "
-        "segments=%s, overwrite=%s, workers=%s, dry_run=%s",
-        input_path,
-        out_dir,
-        backend_name,
-        language,
-        write_segments,
-        overwrite,
-        num_workers,
-        dry_run,
-    )
-    # 创建后端实例以处理音频，透传语言参数供元数据记录。
+    # 将输入与输出路径转换为 Path 对象，后续统一处理。
+    input_path_obj = Path(input_path)
+    out_dir_obj = Path(out_dir)
+    # 在详细模式下输出当前配置，便于调试与审计。
+    if verbose:
+        logger.debug(
+            "Pipeline configuration input=%s out_dir=%s backend=%s language=%s segments_json=%s overwrite=%s dry_run=%s",
+            input_path_obj,
+            out_dir_obj,
+            backend_name,
+            language,
+            segments_json,
+            overwrite,
+            dry_run,
+        )
+    # 扫描输入路径，收集所有符合扩展名的音频文件。
+    audio_files = _scan_audio_inputs(input_path_obj)
+    # 在详细模式下输出扫描结果数量以及每个文件的路径。
+    if verbose:
+        logger.debug("Scanned %d candidate audio files", len(audio_files))
+        for path in audio_files:
+            logger.debug(" - %s", path)
+    # 若不是 dry-run，则提前创建输出目录，确保后续写入不会因目录缺失而失败。
+    if not dry_run:
+        safe_mkdirs(out_dir_obj)
+    # 通过工厂函数实例化后端，占位实现仍然不会触发真实推理。
     backend = create_transcriber(backend_name, language=language)
-    # 收集输入文件列表。
-    input_files = collect_input_files(input_path)
-    # 如果未找到任何文件，记录信息并返回空结果。
-    if not input_files:
-        logger.warning("No input files found for path: %s", input_path)
-    # 确保输出目录存在。
-    ensure_directory(out_dir)
-    # 初始化结果结构体，用于记录处理、跳过与错误。
-    result: PipelineResult = {
-        "processed": [],
-        "skipped": [],
+    # 准备汇总字典，跟踪处理的文件数量与错误信息。
+    summary = {
+        "total": len(audio_files),
+        "processed": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "out_dir": str(out_dir_obj),
         "errors": [],
     }
-    # 遍历每一个待处理的音频文件。
-    for audio_file in input_files:
-        # 记录当前处理的文件。
-        logger.info("Processing %s", audio_file)
-        # 准备文件的基础名称，用于拼接输出文件名。
-        basename = audio_file.stem
-        # 构造词级与段级输出文件路径。
-        words_path = out_dir / f"{basename}.words.json"
-        segments_path = out_dir / f"{basename}.segments.json"
-        error_path = out_dir / f"{basename}.error.txt"
-        # 处理 dry-run 情况：仅打印计划，不调用后端和写文件。
+    # 遍历每一个音频文件执行处理逻辑。
+    for audio_file in audio_files:
+        # 记录开始处理，processed 统计包含所有尝试的文件。
+        summary["processed"] += 1
+        # 计算基础名称，后续用于派生 words/segments/error 文件名。
+        base_name = Path(path_sans_ext(audio_file)).name
+        # 根据统一规则拼接输出文件路径。
+        words_path = out_dir_obj / f"{base_name}.words.json"
+        segments_path = out_dir_obj / f"{base_name}.segments.json"
+        error_path = out_dir_obj / f"{base_name}.error.txt"
+        # 若启用 dry-run，仅打印计划信息并跳过任何写操作。
         if dry_run:
-            # 记录 dry-run 提示信息。
-            logger.info("Dry run: would generate %s and %s", words_path, segments_path)
-            # 将条目加入 processed 列表，标记为 dry-run。
-            result["processed"].append({"path": str(audio_file), "status": "dry-run"})
-            # 跳过实际处理。
-            continue
-        # 检查是否需要覆盖已有文件。
-        if not overwrite and (
-            words_path.exists() or (write_segments and segments_path.exists())
-        ):
-            # 输出跳过信息。
-            logger.info("Skipping %s because output already exists", audio_file)
-            # 记录到 skipped 列表。
-            result["skipped"].append({"path": str(audio_file), "reason": "exists"})
+            logger.info("[dry-run] would write %s", words_path)
+            if segments_json:
+                logger.info("[dry-run] would write %s", segments_path)
+            # dry-run 视为成功处理，用于统计与上层汇报。
+            summary["succeeded"] += 1
             # 继续处理下一个文件。
             continue
+        # 处理覆盖策略：如果目标文件已存在且未允许覆盖，则跳过写入。
+        if not overwrite:
+            words_exists = file_exists(words_path)
+            segments_exists = file_exists(segments_path)
+            if words_exists or (segments_json and segments_exists):
+                logger.info("Skipping %s because output exists", audio_file)
+                # 清理潜在的遗留错误文件，避免误判。
+                error_path.unlink(missing_ok=True)
+                # 视为成功完成（结果已存在）。
+                summary["succeeded"] += 1
+                # 跳过后续写入逻辑。
+                continue
         try:
-            # 调用后端执行转写，获取标准化结构。
+            # 调用后端执行占位转写，返回统一结构的字典。
             transcription = backend.transcribe_file(str(audio_file))
-            # 计算占位时长，后续轮次可替换为真实探测值。
+            # 使用占位的探测函数获取时长，后续轮次会替换为真实实现。
             duration = probe_duration(str(audio_file))
-            # 构造词级数据，保留语言、后端与元信息。
-            words_data = {
+            # 构造词级 JSON 数据结构，保证字段与后端对齐。
+            words_payload = {
                 "language": transcription.get("language", language),
                 "duration_sec": duration,
-                "backend": transcription.get("backend", {}),
+                "backend": transcription.get("backend", {"name": backend_name}),
                 "meta": transcription.get("meta", {}),
                 "words": transcription.get("words", []),
             }
-            # 如需输出段级数据，则准备对应结构。
-            if write_segments:
-                segments_data = {
+            # 若需要输出段级文件，则构造对应结构。
+            if segments_json:
+                segments_payload = {
                     "language": transcription.get("language", language),
                     "duration_sec": duration,
-                    "backend": transcription.get("backend", {}),
+                    "backend": transcription.get("backend", {"name": backend_name}),
                     "meta": transcription.get("meta", {}),
                     "segments": transcription.get("segments", []),
                 }
-            # 清理潜在的旧错误文件，避免误判为失败。
-            if error_path.exists():
-                error_path.unlink()
-            # 将词级 JSON 写入磁盘。
-            write_json_atomic(words_path, words_data)
-            # 如需写段级文件，执行写入操作。
-            if write_segments:
-                write_json_atomic(segments_path, segments_data)
-            # 记录成功处理的文件路径。
-            result["processed"].append({"path": str(audio_file), "status": "written"})
+            # 若存在之前生成的错误文件，成功写入前将其删除。
+            error_path.unlink(missing_ok=True)
+            # 原子写入词级 JSON，确保不会留下半成品。
+            atomic_write_json(words_path, words_payload)
+            # 如需段级文件，则同样以原子写入方式保存。
+            if segments_json:
+                atomic_write_json(segments_path, segments_payload)
+            # 统计成功数量。
+            summary["succeeded"] += 1
         except Exception as exc:  # noqa: BLE001
-            # 捕获异常并记录错误。
+            # 捕获单文件错误，确保其他文件继续执行。
             logger.error("Failed to process %s: %s", audio_file, exc)
-            # 将错误信息写入单独的文本文件以便排查。
-            atomic_write_text(error_path, f"{exc}\n")
-            # 将错误信息加入结果。
-            result["errors"].append({"path": str(audio_file), "error": str(exc)})
-    # 返回最终的结果摘要。
-    return result
-
+            # 记录失败计数并准备错误摘要。
+            summary["failed"] += 1
+            error_message = f"{exc.__class__.__name__}: {exc}"
+            summary["errors"].append({"input": str(audio_file), "reason": error_message})
+            # 拼接带调用栈的完整错误文本写入 .error.txt。
+            traceback_text = traceback.format_exc()
+            atomic_write_text(error_path, f"{error_message}\n{traceback_text}")
+    # 处理结束后输出汇总信息，普通模式下依旧保持简洁。
+    logger.info(
+        "Pipeline finished total=%d processed=%d succeeded=%d failed=%d",
+        summary["total"],
+        summary["processed"],
+        summary["succeeded"],
+        summary["failed"],
+    )
+    # 返回汇总字典供 CLI 或测试使用。
+    return summary

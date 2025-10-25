@@ -220,3 +220,52 @@ ASRProgram/
 * Round 5 起增加更完整的环境自检与依赖安装脚本。
 * Round 7/8 目标接入 faster-whisper 的真实推理与词级时间戳。
 * Round 9 探索多进程/多线程并发处理。
+
+## Round 4：Pipeline 与落盘规则
+Round 4 聚焦于让占位推理流程具备正式版的落盘行为与容错策略：扫描输入、筛选扩展名、原子写入、覆盖策略、错误旁路与 dry-run/verbose 行为全部统一。下图展示完整流程：
+```
+输入路径 → 递归扫描 → 过滤扩展名 → 顺序处理 →
+  ├─(dry-run) 仅打印计划
+  └─(正常) 调用后端 → 生成 words/segments 数据 → 原子写入 out/
+                               └─若失败 → 写入 .error.txt → 继续下一个文件
+最终汇总统计并打印 Summary
+```
+
+### 原子写入与覆盖策略
+- **原子写入**：所有 JSON/文本结果都会先写入同目录的 `.tmp` 文件，随后通过 `os.replace` 原子替换，保证即使中途崩溃也不会留下半截文件。
+- **覆盖策略**：默认 `--overwrite false`，若目标 `*.words.json` 或 `*.segments.json` 已存在则直接跳过并视为成功；只有显式指定 `--overwrite true` 才会重写。
+
+### 错误旁路机制
+- 单个文件处理失败时，会在 `out/<basename>.error.txt` 中记录异常摘要与可选的回溯，其他文件继续执行。
+- CLI 汇总中的 `failed` 数量与 `errors` 列表会同步记录失败条目，便于自动化系统统计。
+- 这类错误不会让进程返回非零退出码，确保批量任务不会被单个文件拖垮。
+
+`.error.txt` 示例：
+```
+RuntimeError: synthetic failure
+Traceback (most recent call last):
+  ...
+```
+
+### 常用命令示例
+```bash
+# 扫描目录，生成 words/segments 占位 JSON
+python -m src.cli.main --input ./samples --out-dir ./out --backend dummy
+
+# 不落盘，仅演练
+python -m src.cli.main --input ./samples --dry-run true --verbose
+
+# 不覆盖已存在结果
+python -m src.cli.main --input ./samples --overwrite false
+
+# 强制覆盖（谨慎使用）
+python -m src.cli.main --input ./samples --overwrite true
+```
+
+### 输出目录规范
+执行成功后，`out/` 下至少包含 `*.words.json`（无论后端是否提供词级内容都会生成，占位时 words 数组为空），若 `--segments-json true` 则额外生成 `*.segments.json`。所有写入均在 `out/` 根目录完成，方便后续对接词级时间戳或其他后处理逻辑。
+
+### dry-run / verbose 行为一致化
+- `--dry-run true`：不创建输出目录、不落盘任何文件，只打印计划动作；`Summary` 中依旧会统计 `succeeded`，以便上层调度系统了解处理总量。
+- `--verbose true`：打印扫描到的文件列表、目标输出路径、覆盖/跳过决策以及最终汇总详情，便于问题排查。
+
