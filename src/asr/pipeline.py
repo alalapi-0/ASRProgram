@@ -38,7 +38,17 @@ from src.utils.io import (
     with_file_lock,
 )
 # 导入日志工具用于打印细粒度日志与进度。 
-from src.utils.logging import ProgressPrinter, TaskLogger, get_logger
+from src.utils.logging import (  # 导入日志工具集以支持结构化日志。
+    ProgressPrinter,  # 导入进度打印器以展示任务进度。
+    StructuredLogger,  # 导入结构化日志器类型以便类型注释。
+    TaskLogger,  # 导入任务级日志辅助类。
+    bind_context,  # 导入上下文绑定函数以注入 trace_id 等字段。
+    get_logger,  # 导入工厂函数以创建日志器实例。
+    new_trace_id,  # 导入 TraceID 生成工具。
+    print_summary,  # 导入汇总打印函数用于统一输出。
+)
+from src.utils.metrics import MetricsSink  # 导入指标收集器以统计运行数据。
+from src.utils.profiling import PhaseTimer  # 导入阶段计时器实现轻量级 Profiler。
 # 导入 Manifest 工具以在处理各阶段记录状态。 
 from src.utils.manifest import append_record as manifest_append_record, load_index as manifest_load_index
 
@@ -55,6 +65,7 @@ EPSILON = 1e-3
 class PipelineTask:
     """描述单个音频文件需要的输出路径与锁路径。"""  # 类说明。
 
+    index: int  # 任务在批处理队列中的序号。
     input_path: Path  # 输入音频文件路径。
     base_name: str  # 去除扩展名后的基名，复用以构造输出文件。
     words_path: Path  # 词级输出文件路径。
@@ -89,7 +100,12 @@ class TaskContext:
     language: str  # 语言参数。
     segments_json: bool  # 是否输出段级 JSON。
     max_retries: int  # 最大重试次数。
-    task_logger: TaskLogger  # 任务级日志器。
+    logger: StructuredLogger  # 运行级结构化日志器。
+    verbose: bool  # 是否输出详细日志。
+    metrics: MetricsSink  # 共享指标收集器。
+    profile_enabled: bool  # 是否启用阶段级 Profiling。
+    metrics_labels: Dict[str, Any]  # 用于全局指标的标签快照。
+    trace_id: str  # 当前批次的 TraceID。
     progress: ProgressPrinter  # 进度打印器。
     skip_done: bool  # 是否跳过已完成任务。
     overwrite: bool  # 是否覆盖已有结果。
@@ -158,8 +174,8 @@ def _build_payloads(
     backend_name: str,
     segments_json: bool,
     audio_hash: str | None,
-) -> Tuple[Dict[str, Any], Dict[str, Any] | None, float]:
-    """依据后端结果构建 words/segments JSON 结构并返回时长。"""  # 函数说明。
+) -> Tuple[Dict[str, Any], Dict[str, Any] | None, float, int, int]:
+    """依据后端结果构建 words/segments JSON 结构并返回统计信息。"""  # 函数说明。
     raw_words = [dict(word) for word in transcription.get("words", [])]  # 拷贝词数组。
     fixed_words, adjustments = _ensure_word_monotonicity(raw_words)  # 修正逆序时间。
     segments_data = []  # 初始化段级数据容器。
@@ -218,7 +234,7 @@ def _build_payloads(
             "segments": segments_data,
             "generated_at": generated_at,
         }
-    return words_payload, segments_payload, duration  # 返回构造的载荷与时长。
+    return words_payload, segments_payload, duration, len(fixed_words), len(segments_data)  # 返回构造的载荷与统计。
 
 
 # 定义辅助函数：读取现有 words.json 的音频元数据。 
@@ -251,8 +267,15 @@ def _transcribe_and_write_once(
 ) -> Dict[str, Any]:
     """执行一次转写调用并落盘，失败时抛出异常。"""  # 函数说明。
     try:
-        transcription = context.backend.transcribe_file(str(task.input_path))  # 调用后端完成转写。
-        words_payload, segments_payload, duration = _build_payloads(
+        phase_labels = {
+            **context.metrics_labels,
+            "trace_id": context.trace_id,
+            "input": str(task.input_path),
+            "basename": task.base_name,
+        }  # 构造用于指标的标签字典。
+        with PhaseTimer(context.metrics, "transcribe", labels=phase_labels, enabled=context.profile_enabled):
+            transcription = context.backend.transcribe_file(str(task.input_path))  # 调用后端完成转写并测量耗时。
+        words_payload, segments_payload, duration, words_count, segments_count = _build_payloads(
             task.input_path,
             transcription,
             context.language,
@@ -266,12 +289,18 @@ def _transcribe_and_write_once(
             if segments_payload is not None:
                 segments_payload["audio"]["duration_sec"] = duration
         task.error_path.unlink(missing_ok=True)  # 在写入前移除旧的错误文件。
-        atomic_write_json(task.words_path, words_payload)  # 原子写入词级 JSON。
-        outputs = [str(task.words_path)]  # 初始化输出列表。
-        if context.segments_json and segments_payload is not None:
-            atomic_write_json(task.segments_path, segments_payload)
-            outputs.append(str(task.segments_path))
-        return {"duration": duration, "outputs": outputs}  # 返回写入结果供统计使用。
+        with PhaseTimer(context.metrics, "write_outputs", labels=phase_labels, enabled=context.profile_enabled):
+            atomic_write_json(task.words_path, words_payload)  # 原子写入词级 JSON。
+            outputs = [str(task.words_path)]  # 初始化输出列表。
+            if context.segments_json and segments_payload is not None:
+                atomic_write_json(task.segments_path, segments_payload)
+                outputs.append(str(task.segments_path))
+        return {
+            "duration": duration,
+            "outputs": outputs,
+            "segments": segments_count,
+            "words": words_count,
+        }  # 返回写入结果及统计数据供上层使用。
     except RetryableError:
         raise  # 已有明确分类的可重试错误直接抛出。
     except NonRetryableError:
@@ -287,7 +316,22 @@ def _transcribe_and_write_once(
 # 定义任务执行函数，负责锁定、哈希校验与 Manifest 记录。 
 def _process_one(task: PipelineTask, context: TaskContext) -> TaskResult:
     """执行单个任务的完整生命周期并返回结果。"""  # 函数说明。
-    context.task_logger.start(str(task.input_path))  # 输出开始日志。
+    task_logger = TaskLogger(  # 根据任务上下文创建日志器。
+        bind_context(
+            context.logger,
+            task={"index": task.index, "input": str(task.input_path), "basename": task.base_name},
+        ),
+        context.verbose,
+    )
+    metrics = context.metrics  # 引用共享指标收集器。
+    task_metric_labels = {
+        **context.metrics_labels,
+        "trace_id": context.trace_id,
+        "input": str(task.input_path),
+        "basename": task.base_name,
+        "index": task.index,
+    }  # 构造任务级指标标签。
+    task_logger.start(str(task.input_path))  # 输出开始日志。
     start_time = time.monotonic()  # 记录起始时间。
     attempts = {"value": 0}  # 可变字典用于记录尝试次数。
     # 根据配置计算音频哈希，缺失时置为 None。 
@@ -312,6 +356,7 @@ def _process_one(task: PipelineTask, context: TaskContext) -> TaskResult:
                     "error": {"type": "NonRetryableError", "message": str(exc)},
                 },
             )
+            metrics.inc("files_failed", 1, labels=context.metrics_labels)  # 记录失败计数。
             return TaskResult(
                 input_path=task.input_path,
                 status="failed",
@@ -344,13 +389,16 @@ def _process_one(task: PipelineTask, context: TaskContext) -> TaskResult:
                     else:
                         skip_reason = "exists"
             if skip_reason is not None:
-                context.task_logger.skipped(str(task.input_path), skip_reason)
+                task_logger.skipped(str(task.input_path), skip_reason)
                 task.error_path.unlink(missing_ok=True)
                 error_payload = (
                     {"type": "StaleResult", "message": "stale result; use --overwrite true to rebuild"}
                     if stale
                     else {"type": "Skip", "message": skip_reason}
                 )
+                skip_duration = time.monotonic() - start_time  # 计算跳过耗时。
+                metrics.inc("files_skipped", 1, labels=context.metrics_labels)  # 记录跳过计数。
+                metrics.observe("task_elapsed_sec", skip_duration, labels=task_metric_labels)  # 记录跳过耗时。
                 manifest_append_record(
                     context.manifest_path,
                     {
@@ -364,7 +412,7 @@ def _process_one(task: PipelineTask, context: TaskContext) -> TaskResult:
                             "segments": str(task.segments_path) if segments_exists and context.segments_json else None,
                         },
                         "duration_sec": existing_duration or 0.0,
-                        "elapsed_sec": time.monotonic() - start_time,
+                        "elapsed_sec": skip_duration,
                         "error": error_payload,
                     },
                 )
@@ -374,7 +422,7 @@ def _process_one(task: PipelineTask, context: TaskContext) -> TaskResult:
                     input_path=task.input_path,
                     status="skipped",
                     attempts=0,
-                    duration=time.monotonic() - start_time,
+                    duration=skip_duration,
                     outputs=[str(task.words_path)] if words_exists else [],
                     error=None,
                     skipped_reason=skip_reason,
@@ -397,7 +445,7 @@ def _process_one(task: PipelineTask, context: TaskContext) -> TaskResult:
                 },
             )
             def _on_retry(attempt: int, exc: Exception) -> None:
-                context.task_logger.retry(str(task.input_path), attempt, exc)
+                task_logger.retry(str(task.input_path), attempt, exc)
             @retry(
                 max_retries=max(context.max_retries, 0),
                 backoff=2.0,
@@ -412,7 +460,7 @@ def _process_one(task: PipelineTask, context: TaskContext) -> TaskResult:
             try:
                 result = _execute()
                 duration = time.monotonic() - start_time
-                context.task_logger.success(str(task.input_path), duration, attempts["value"], result["outputs"])
+                task_logger.success(str(task.input_path), duration, attempts["value"], result["outputs"])
                 manifest_append_record(
                     context.manifest_path,
                     {
@@ -430,6 +478,10 @@ def _process_one(task: PipelineTask, context: TaskContext) -> TaskResult:
                         "error": None,
                     },
                 )
+                metrics.inc("files_succeeded", 1, labels=context.metrics_labels)  # 记录成功计数。
+                metrics.observe("task_elapsed_sec", duration, labels=task_metric_labels)  # 记录任务耗时。
+                metrics.observe("task_num_segments", float(result.get("segments", 0)), labels=task_metric_labels)  # 记录段数。
+                metrics.observe("task_num_words", float(result.get("words", 0)), labels=task_metric_labels)  # 记录词数。
                 context.progress.update("ok")
                 return TaskResult(
                     input_path=task.input_path,
@@ -442,7 +494,7 @@ def _process_one(task: PipelineTask, context: TaskContext) -> TaskResult:
                 )
             except RetryError as exc:
                 duration = time.monotonic() - start_time
-                context.task_logger.failure(str(task.input_path), attempts["value"], exc.last_exception)
+                task_logger.failure(str(task.input_path), attempts["value"], exc.last_exception)
                 reason = f"{exc.last_exception.__class__.__name__}: {exc.last_exception}"
                 traceback_text = "".join(
                     traceback.format_exception(
@@ -469,6 +521,8 @@ def _process_one(task: PipelineTask, context: TaskContext) -> TaskResult:
                 )
                 if context.cleanup_temp:
                     cleanup_partials(context.out_dir, task.base_name)
+                metrics.inc("files_failed", 1, labels=context.metrics_labels)  # 记录失败计数。
+                metrics.observe("task_elapsed_sec", duration, labels=task_metric_labels)  # 记录失败耗时。
                 context.progress.update("fail")
                 return TaskResult(
                     input_path=task.input_path,
@@ -481,7 +535,7 @@ def _process_one(task: PipelineTask, context: TaskContext) -> TaskResult:
                 )
             except NonRetryableError as exc:
                 duration = time.monotonic() - start_time
-                context.task_logger.failure(str(task.input_path), attempts.get("value", 1), exc)
+                task_logger.failure(str(task.input_path), attempts.get("value", 1), exc)
                 atomic_write_text(task.error_path, f"NonRetryableError: {exc}\n")
                 manifest_append_record(
                     context.manifest_path,
@@ -499,6 +553,8 @@ def _process_one(task: PipelineTask, context: TaskContext) -> TaskResult:
                 )
                 if context.cleanup_temp:
                     cleanup_partials(context.out_dir, task.base_name)
+                metrics.inc("files_failed", 1, labels=context.metrics_labels)  # 将不可重试错误计入失败。
+                metrics.observe("task_elapsed_sec", duration, labels=task_metric_labels)  # 记录耗时。
                 context.progress.update("fail")
                 return TaskResult(
                     input_path=task.input_path,
@@ -511,7 +567,7 @@ def _process_one(task: PipelineTask, context: TaskContext) -> TaskResult:
                 )
             except Exception as exc:  # noqa: BLE001
                 duration = time.monotonic() - start_time
-                context.task_logger.failure(str(task.input_path), attempts.get("value", 1), exc)
+                task_logger.failure(str(task.input_path), attempts.get("value", 1), exc)
                 traceback_text = traceback.format_exc()
                 atomic_write_text(task.error_path, f"{exc.__class__.__name__}: {exc}\n{traceback_text}")
                 manifest_append_record(
@@ -530,6 +586,8 @@ def _process_one(task: PipelineTask, context: TaskContext) -> TaskResult:
                 )
                 if context.cleanup_temp:
                     cleanup_partials(context.out_dir, task.base_name)
+                metrics.inc("files_failed", 1, labels=context.metrics_labels)  # 将未知异常计入失败。
+                metrics.observe("task_elapsed_sec", duration, labels=task_metric_labels)  # 记录失败耗时。
                 context.progress.update("fail")
                 return TaskResult(
                     input_path=task.input_path,
@@ -541,7 +599,10 @@ def _process_one(task: PipelineTask, context: TaskContext) -> TaskResult:
                     hash_value=audio_hash,
                 )
     except TimeoutError as exc:
-        context.task_logger.skipped(str(task.input_path), "lock-timeout")
+        task_logger.skipped(str(task.input_path), "lock-timeout")
+        lock_duration = time.monotonic() - start_time  # 计算锁等待耗时。
+        metrics.inc("files_skipped", 1, labels=context.metrics_labels)  # 将锁超时计入跳过计数。
+        metrics.observe("task_elapsed_sec", lock_duration, labels=task_metric_labels)  # 记录耗时。
         manifest_append_record(
             context.manifest_path,
             {
@@ -552,7 +613,7 @@ def _process_one(task: PipelineTask, context: TaskContext) -> TaskResult:
                 "backend": context.backend_name,
                 "out": {},
                 "duration_sec": 0.0,
-                "elapsed_sec": time.monotonic() - start_time,
+                "elapsed_sec": lock_duration,
                 "error": {"type": "LockTimeout", "message": str(exc)},
             },
         )
@@ -561,7 +622,7 @@ def _process_one(task: PipelineTask, context: TaskContext) -> TaskResult:
             input_path=task.input_path,
             status="skipped",
             attempts=0,
-            duration=time.monotonic() - start_time,
+            duration=lock_duration,
             outputs=[],
             error=None,
             skipped_reason="lock-timeout",
@@ -579,6 +640,14 @@ def run(
     overwrite: bool = False,
     dry_run: bool = False,
     verbose: bool = False,
+    log_format: str = "human",
+    log_level: str = "INFO",
+    log_file: str | None = None,
+    log_sample_rate: float = 1.0,
+    quiet: bool = False,
+    metrics_file: str | None = None,
+    profile: bool = False,
+    progress: bool = True,
     model: str | None = None,
     compute_type: str = "auto",
     device: str = "auto",
@@ -598,6 +667,7 @@ def run(
     cleanup_temp: bool = True,
     manifest_path: str | None = None,
     force: bool = False,
+    logger: StructuredLogger | None = None,
     **legacy_kwargs,
 ) -> dict:
     """执行批量音频转写并返回统计摘要。"""  # 函数说明。
@@ -607,27 +677,49 @@ def run(
     if legacy_kwargs:
         unsupported = ", ".join(sorted(legacy_kwargs.keys()))
         raise TypeError(f"Unsupported arguments for pipeline.run: {unsupported}")
-    logger = get_logger(verbose)
-    if verbose:
-        logger.debug(
-            "Pipeline configuration input=%s out_dir=%s backend=%s workers=%d max_retries=%d rate_limit=%s skip_done=%s fail_fast=%s",
-            input_path,
-            out_dir,
-            backend_name,
-            num_workers,
-            max_retries,
-            rate_limit,
-            skip_done,
-            fail_fast,
+    effective_level = log_level.upper() if log_level else "INFO"  # 规范化日志等级。
+    if verbose and effective_level == "INFO":  # 兼容旧版 verbose 行为，在默认等级时提升为 DEBUG。
+        effective_level = "DEBUG"
+    base_logger = logger or get_logger(
+        format=log_format,
+        level=effective_level,
+        log_file=log_file,
+        sample_rate=log_sample_rate,
+        quiet=quiet,
+    )  # 创建或复用结构化日志器。
+    trace_id = new_trace_id()  # 为本次运行生成 TraceID。
+    run_logger = bind_context(base_logger, trace_id=trace_id)  # 绑定 TraceID 形成运行级日志器。
+    if verbose:  # 在详细模式下输出配置摘要。
+        run_logger.debug(
+            "pipeline configuration",
+            config={
+                "input": input_path,
+                "out_dir": out_dir,
+                "backend": backend_name,
+                "workers": num_workers,
+                "max_retries": max_retries,
+                "rate_limit": rate_limit,
+                "skip_done": skip_done,
+                "fail_fast": fail_fast,
+            },
         )
+    metrics = MetricsSink()  # 初始化指标收集器。
+    metrics_labels = {
+        "backend": backend_name,
+        "model": model or "auto",
+        "compute_type": compute_type,
+    }  # 构造全局标签快照。
+    phase_labels = {**metrics_labels, "trace_id": trace_id}  # 构造用于阶段指标的标签。
     input_path_obj = Path(input_path)
     out_dir_obj = Path(out_dir)
     manifest_path_obj = Path(manifest_path) if manifest_path else out_dir_obj / "_manifest.jsonl"
-    audio_files = _scan_audio_inputs(input_path_obj)
+    with PhaseTimer(metrics, "scan", labels=phase_labels, enabled=profile):
+        audio_files = _scan_audio_inputs(input_path_obj)
+    metrics.inc("files_total", float(len(audio_files)), labels=metrics_labels)  # 记录扫描到的音频文件数。
     if verbose:
-        logger.debug("Scanned %d candidate audio files", len(audio_files))
+        run_logger.debug("scan completed", files=len(audio_files))
         for path in audio_files:
-            logger.debug(" - %s", path)
+            run_logger.debug("scan candidate", file=str(path))
     if not dry_run:
         safe_mkdirs(out_dir_obj)
         safe_mkdirs(manifest_path_obj.parent)
@@ -644,8 +736,10 @@ def run(
         "best_of": best_of,
         "patience": patience,
     }
-    backend = create_transcriber(backend_name, **backend_kwargs)
-    task_logger = TaskLogger(logger, verbose)
+    with PhaseTimer(metrics, "load_backend", labels=phase_labels, enabled=profile):
+        backend = create_transcriber(backend_name, **backend_kwargs)
+    if verbose:
+        run_logger.debug("backend initialized", backend=backend_name)
     skipped_items: List[dict] = []
     planned_count = 0
     tasks: List[PipelineTask] = []
@@ -656,11 +750,24 @@ def run(
         error_path = out_dir_obj / f"{base_name}.error.txt"
         lock_path = out_dir_obj / f"{base_name}.lock"
         if dry_run:
-            task_logger.skipped(str(audio_file), "dry-run")
+            dry_logger = TaskLogger(
+                bind_context(
+                    run_logger,
+                    task={
+                        "index": planned_count,
+                        "input": str(audio_file),
+                        "basename": base_name,
+                    },
+                ),
+                verbose,
+            )
+            dry_logger.skipped(str(audio_file), "dry-run")
             planned_count += 1
             continue
+        task_index = len(tasks)
         tasks.append(
             PipelineTask(
+                index=task_index,
                 input_path=audio_file,
                 base_name=base_name,
                 words_path=words_path,
@@ -669,8 +776,41 @@ def run(
                 lock_path=lock_path,
             )
         )
+    def _export_metrics_file(elapsed: float) -> None:
+        """在需要时导出指标文件并记录耗时指标。"""  # 内部辅助函数说明。
+        metrics.observe("elapsed_total_sec", elapsed, labels=metrics_labels)  # 记录整体耗时。
+        snapshot = metrics.summary(labels=metrics_labels)  # 计算派生指标供导出使用。
+        metrics.observe("avg_file_sec", snapshot.get("avg_file_sec", 0.0), labels=metrics_labels)  # 记录平均耗时。
+        metrics.observe(
+            "throughput_files_per_min",
+            snapshot.get("throughput_files_per_min", 0.0),
+            labels=metrics_labels,
+        )  # 记录吞吐量。
+        if not metrics_file:  # 未指定输出文件则直接返回。
+            return
+        metrics_path = Path(metrics_file)  # 将路径转换为 Path 便于解析后缀。
+        if metrics_path.suffix.lower() == ".csv":  # 根据后缀选择导出格式。
+            metrics.export_csv(str(metrics_path))
+        else:
+            metrics.export_jsonl(str(metrics_path))
+        run_logger.info("metrics exported", path=str(metrics_path), format=metrics_path.suffix.lower().lstrip("."))
+
+    def _finalize(summary: dict) -> dict:
+        """统一处理摘要日志、指标导出与补充提示。"""  # 内部辅助函数说明。
+        _export_metrics_file(float(summary.get("elapsed_sec", 0.0)))  # 导出指标并记录总耗时。
+        print_summary(summary, logger=run_logger)  # 输出结构化汇总。
+        manifest_location = summary.get("manifest_path")  # 读取 Manifest 路径。
+        if manifest_location:
+            run_logger.info("manifest updated", path=manifest_location)  # 提示 Manifest 更新位置。
+        stale_skips = summary.get("skipped_stale", 0)  # 读取陈旧跳过数量。
+        if stale_skips:
+            run_logger.info("stale results skipped", count=stale_skips)
+        lock_conflicts = summary.get("lock_conflicts", 0)  # 读取锁冲突数量。
+        if lock_conflicts:
+            run_logger.info("lock conflicts", count=lock_conflicts)
+        return summary  # 返回摘要供上层使用。
     if dry_run:
-        return {
+        summary = {
             "total": len(audio_files),
             "queued": 0,
             "processed": planned_count,
@@ -688,8 +828,9 @@ def run(
             "skipped_stale": 0,
             "lock_conflicts": 0,
         }
+        return _finalize(summary)
     if not tasks:
-        return {
+        summary = {
             "total": len(audio_files),
             "queued": 0,
             "processed": 0,
@@ -707,14 +848,23 @@ def run(
             "skipped_stale": 0,
             "lock_conflicts": 0,
         }
-    progress = ProgressPrinter(len(tasks), "processing", enabled=True)
+        return _finalize(summary)
+    progress_allowed = progress and not quiet  # 仅在允许进度且非静默时启用。
+    if log_format.lower() == "jsonl" and quiet:
+        progress_allowed = False  # 在 JSONL+静默模式下关闭进度动画以避免干扰。
+    progress = ProgressPrinter(len(tasks), "processing", enabled=progress_allowed, logger=run_logger)
     context = TaskContext(
         backend=backend,
         backend_name=backend_name,
         language=language,
         segments_json=segments_json,
         max_retries=max_retries,
-        task_logger=task_logger,
+        logger=run_logger,
+        verbose=verbose,
+        metrics=metrics,
+        profile_enabled=profile,
+        metrics_labels=metrics_labels,
+        trace_id=trace_id,
         progress=progress,
         skip_done=skip_done,
         overwrite=overwrite,
@@ -819,4 +969,4 @@ def run(
         "skipped_stale": skipped_stale,
         "lock_conflicts": lock_conflicts,
     }
-    return summary
+    return _finalize(summary)

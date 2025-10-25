@@ -198,6 +198,60 @@ python -m src.cli.main \
 ### 故障排查
 * **大量失败**：检查 `*.error.txt` 中的堆栈，确认是否为权限、路径或后端模型问题；必要时降低 `--num-workers` 并开启 `--verbose`。
 * **输出目录不可写**：管线会检测并立即报错；确认目录权限或切换到可写路径。
+
+## Round 12：结构化日志与可观测性升级
+为便于大规模跑批后的溯源与自动化分析，本轮引入结构化日志、指标导出、轻量 Profiler 以及 TraceID 贯穿机制。所有日志既可面向人类阅读，也可被机器消费；同时可将指标落盘为 CSV/JSONL，用于后续 BI 与监控系统接入。
+
+### 快速体验：JSONL 日志 + 指标导出
+```bash
+python -m src.cli.main \
+  --input ./samples \
+  --backend faster-whisper \
+  --log-format jsonl \
+  --log-file logs/run.jsonl \
+  --metrics-file logs/metrics.jsonl \
+  --profile true \
+  --verbose true
+```
+
+上述命令会生成结构化 JSONL 日志与指标文件，所有事件都附带同一个 `trace_id`，方便后续过滤与联调。
+
+### 新增参数
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--log-format` | `human` | 控制日志格式，可选 `human`（易读）或 `jsonl`（机器处理）。 |
+| `--log-level` | `INFO` | 调整日志等级；配合 `--log-file` 可保留详细追踪。 |
+| `--log-file` | `None` | 若设置，则以追加模式写入指定文件，同时仍可选择是否在控制台输出。 |
+| `--log-sample-rate` | `1.0` | 针对 `INFO`/`DEBUG` 级别的采样率，降低跑批时的日志噪音。 |
+| `--metrics-file` | `None` | 若提供，则在运行结束时将全局与任务级指标导出为 CSV 或 JSONL。 |
+| `--profile` | `false` | 启用轻量级阶段 Profiler，额外记录 `scan`、`load_backend`、`transcribe`、`write_outputs` 的耗时拆分。 |
+| `--quiet` | `false` | 静默模式，关闭控制台的 human 日志输出；仍会写入 `--log-file` 以及 JSONL。 |
+| `--progress` | `true` | 是否显示进度条；当 `--log-format jsonl --quiet true` 时建议关闭以保持终端整洁。 |
+
+### TraceID 与上下文绑定
+每次调用 `pipeline.run` 会生成一个 12 字符的 TraceID，所有日志均自动附带。例如可以使用 `jq`/`rg` 按 TraceID 聚合排查：
+```bash
+rg 'trace="ab12cd34ef56"' logs/run.jsonl
+```
+同时每个任务的日志都包含 `task.index`、`task.input` 与 `task.basename`，方便定位单个文件的生命周期。
+
+### 指标文件内容
+指标导出包含以下核心字段：
+* 计数器：`files_total`、`files_succeeded`、`files_failed`、`files_skipped`。
+* 摘要：`elapsed_total_sec`、`avg_file_sec`、`throughput_files_per_min`。
+* 阶段耗时（开启 `--profile true` 时）：`phase_scan_sec`、`phase_load_backend_sec`、`phase_transcribe_sec`、`phase_write_outputs_sec`。
+
+CSV 与 JSONL 的差异：CSV 提供统一表头，便于导入 BI；JSONL 则保留字典结构，更适合直接被日志系统摄取。
+
+### 日志采样与静默模式
+当批量任务产生大量 `INFO` 日志时，可通过 `--log-sample-rate 0.2` 等设置保留 20% 信息级事件，`ERROR`/`WARNING` 永不被采样。若希望完全静默终端输出，可结合 `--quiet true --log-file run.jsonl`，同时禁用进度条：`--progress false`。
+
+### 最佳实践
+* **本地调试**：`--log-format human --log-level DEBUG --profile true --progress true`，实时查看控制台输出并观察阶段耗时。
+* **机器跑批**：`--log-format jsonl --quiet true --progress false --metrics-file logs/metrics.jsonl --log-file logs/run.jsonl`，将日志与指标写入文件便于后续分析或监控平台消费。
+
+通过本轮改进，可快速回答“某个 Trace 的吞吐如何”“某阶段是否异常慢”等问题，同时与现有的并发/重试机制无缝配合。
+
 * **吞吐忽快忽慢**：可能由限流或后端冷启动导致，适当调整 `--rate-limit` 或增减并发度。
 * **内存吃紧**：适当减小 `--num-workers`，或在测试阶段启用 `--skip-done true` + `--fail-fast true`，快速定位问题文件。
 

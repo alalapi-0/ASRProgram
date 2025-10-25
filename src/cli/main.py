@@ -3,12 +3,13 @@
 import argparse
 # 导入 sys 以在脚本作为模块运行时返回退出码。 
 import sys
+import traceback  # 导入 traceback 以在 verbose 模式下输出堆栈。
 # 导入 Path 以在默认 manifest 路径中复用。 
 from pathlib import Path
 # 从管线模块导入 run 函数执行核心逻辑。 
 from src.asr.pipeline import run
 # 导入日志工具以统一输出格式与打印汇总。 
-from src.utils.logging import get_logger, print_summary
+from src.utils.logging import get_logger
 
 # 定义允许的后端名称集合，便于参数校验。 
 ALLOWED_BACKENDS = {"dummy", "faster-whisper"}
@@ -29,7 +30,7 @@ def parse_bool(value: str) -> bool:
 def build_parser() -> argparse.ArgumentParser:
     """创建参数解析器并声明所有可用选项。"""  # 函数说明。
     parser = argparse.ArgumentParser(
-        description="ASRProgram Round 11 transcription pipeline",
+        description="ASRProgram Round 12 transcription pipeline",
     )
     parser.add_argument("--input", required=True, help="输入音频文件或目录")
     parser.add_argument("--out-dir", default="out", help="输出 JSON 所在目录")
@@ -62,6 +63,51 @@ def build_parser() -> argparse.ArgumentParser:
         type=parse_bool,
         default="false",
         help="输出详细日志 (true/false)",
+    )
+    parser.add_argument(
+        "--log-format",
+        choices=["human", "jsonl"],
+        default="human",
+        help="日志格式，human 适合调试，jsonl 适合机器消费",
+    )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        help="日志等级（DEBUG/INFO/WARNING/ERROR）",
+    )
+    parser.add_argument(
+        "--log-file",
+        default=None,
+        help="可选日志文件路径，追加写入",
+    )
+    parser.add_argument(
+        "--log-sample-rate",
+        type=float,
+        default=1.0,
+        help="信息级日志采样率 (0-1]",
+    )
+    parser.add_argument(
+        "--metrics-file",
+        default=None,
+        help="若提供则导出指标到指定 CSV/JSONL",
+    )
+    parser.add_argument(
+        "--profile",
+        type=parse_bool,
+        default="false",
+        help="是否启用阶段耗时分析 (true/false)",
+    )
+    parser.add_argument(
+        "--quiet",
+        type=parse_bool,
+        default="false",
+        help="静默模式，控制台不输出 human 日志",
+    )
+    parser.add_argument(
+        "--progress",
+        type=parse_bool,
+        default="true",
+        help="是否显示进度条 (true/false)",
     )
     parser.add_argument(
         "--num-workers",
@@ -133,9 +179,16 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(
             f"Unsupported backend '{args.backend}'. Choose from: {', '.join(sorted(ALLOWED_BACKENDS))}"
         )
-    logger = get_logger(args.verbose)  # 初始化日志器。
-    if args.verbose:  # 在详细模式下打印解析参数供调试。
-        logger.debug("CLI parsed arguments: %s", args)
+    sample_rate = max(min(args.log_sample_rate, 1.0), 1e-6)  # 对采样率进行截断避免非法值。
+    logger = get_logger(  # 根据 CLI 参数创建结构化日志器。
+        format=args.log_format,
+        level=args.log_level,
+        log_file=args.log_file,
+        sample_rate=sample_rate,
+        quiet=args.quiet,
+    )
+    if args.verbose:  # 在详细模式下输出解析后的参数。
+        logger.debug("cli arguments", arguments=vars(args))
     manifest_path = args.manifest_path or str(Path(args.out_dir) / "_manifest.jsonl")
     try:
         summary = run(
@@ -147,6 +200,14 @@ def main(argv: list[str] | None = None) -> int:
             overwrite=args.overwrite,
             dry_run=args.dry_run,
             verbose=args.verbose,
+            log_format=args.log_format,
+            log_level=args.log_level,
+            log_file=args.log_file,
+            log_sample_rate=sample_rate,
+            quiet=args.quiet,
+            metrics_file=args.metrics_file,
+            profile=args.profile,
+            progress=args.progress,
             num_workers=max(1, args.num_workers),
             max_retries=max(0, args.max_retries),
             rate_limit=max(0.0, args.rate_limit),
@@ -157,22 +218,13 @@ def main(argv: list[str] | None = None) -> int:
             cleanup_temp=args.cleanup_temp,
             manifest_path=manifest_path,
             force=args.force,
+            logger=logger,
         )
     except Exception as exc:  # noqa: BLE001
-        logger.error("Fatal pipeline error: %s", exc)
+        logger.error("fatal pipeline error", error=str(exc))
         if args.verbose:
-            logger.exception("Stack trace for fatal pipeline error")
+            logger.error("pipeline stack trace", trace=traceback.format_exc())
         return 1
-    print_summary(summary, logger=logger)  # 输出标准汇总。
-    manifest_location = summary.get("manifest_path", manifest_path)
-    if manifest_location:
-        logger.info("Manifest updated at %s", manifest_location)
-    stale_skips = summary.get("skipped_stale", 0)
-    if stale_skips:
-        logger.info("Stale results skipped: %d (rerun with --overwrite true to rebuild)", stale_skips)
-    lock_conflicts = summary.get("lock_conflicts", 0)
-    if lock_conflicts:
-        logger.info("Lock conflicts encountered: %d (consider adjusting --lock-timeout)", lock_conflicts)
     return 0
 
 # 允许通过 python -m 调用模块。 
