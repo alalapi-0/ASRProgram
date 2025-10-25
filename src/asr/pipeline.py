@@ -1,184 +1,193 @@
-"""实现 Round 9 的并发批处理转写管线。"""  # 模块说明。
-# 导入 errno 以根据错误码区分重试策略。 
+"""实现 Round 11 的并发批处理转写管线，强化锁与完整性校验。"""  # 模块说明。
+# 导入 errno 以识别常见 I/O 错误码并辅助错误分类。 
 import errno
-# 导入 os 以检查输出目录写权限。 
+# 导入 json 以读取已有 words.json 用于哈希比对。 
+import json
+# 导入 os 以检查目录权限等。 
 import os
-# 导入 time 以测量总耗时与单任务耗时。 
+# 导入 time 以测量耗时与控制重试。 
 import time
-# 导入 traceback 以在写入错误文件时记录堆栈。 
+# 导入 traceback 以在错误文件中写入堆栈信息。 
 import traceback
-# 导入 dataclasses 以定义任务与结果的结构化数据。 
+# 导入 dataclass 用于结构化任务与结果。 
 from dataclasses import dataclass
-# 导入 datetime/timezone 以在 JSON 中写入 UTC 时间。 
+# 导入 datetime 与 timezone 以生成 UTC 时间戳。 
 from datetime import datetime, timezone
-# 导入 pathlib.Path 以统一路径处理。 
+# 导入 pathlib.Path 统一路径处理。 
 from pathlib import Path
-# 导入 typing 中的 Any、Dict、Iterable、List、Tuple 进行类型注释。 
+# 导入 typing 类型注释。 
 from typing import Any, Dict, List, Tuple
 
-# 导入 create_transcriber 工厂以实例化后端。 
+# 导入后端工厂以实例化转写器。 
 from src.asr.backends import create_transcriber
-# 导入音频工具以筛选音频文件与探测时长。 
+# 导入音频工具以筛选文件与探测时长。 
 from src.utils.audio import is_audio_path, probe_duration
-# 导入并发工具中的重试与线程池运行器。 
+# 导入并发工具的重试装饰器与线程池运行器。 
 from src.utils.concurrency import RetryError, retry, run_with_threadpool
-# 导入原子写入与路径辅助函数。 
-from src.utils.io import atomic_write_json, atomic_write_text, file_exists, path_sans_ext, safe_mkdirs
-# 导入日志工具以获取日志器、记录任务日志与进度。 
+# 导入错误类型与分类工具。 
+from src.utils.errors import NonRetryableError, RetryableError, classify_exception
+# 导入 I/O 工具以执行原子写入、清理与锁定。 
+from src.utils.io import (
+    atomic_write_json,
+    atomic_write_text,
+    cleanup_partials,
+    file_exists,
+    path_sans_ext,
+    safe_mkdirs,
+    sha256_file,
+    with_file_lock,
+)
+# 导入日志工具用于打印细粒度日志与进度。 
 from src.utils.logging import ProgressPrinter, TaskLogger, get_logger
+# 导入 Manifest 工具以在处理各阶段记录状态。 
+from src.utils.manifest import append_record as manifest_append_record, load_index as manifest_load_index
 
-# 定义允许的音频扩展名列表，供扫描阶段过滤使用。 
+# 定义允许的音频扩展名集合。 
 ALLOWED_EXTENSIONS = [".wav", ".mp3", ".m4a", ".flac"]
-# 定义词级与段级 JSON 的 schema 名称，保持版本一致性。 
+# 定义词级与段级 JSON 的 schema 标识。 
 WORD_SCHEMA = "asrprogram.wordset.v1"
 SEGMENT_SCHEMA = "asrprogram.segmentset.v1"
-# 定义单调性修正的微小阈值。 
+# 定义修正逆序时间的微小阈值。 
 EPSILON = 1e-3
 
-# 定义可重试的异常类型，用于区分临时失败与致命错误。 
-class TransientTaskError(RuntimeError):
-    """表示可以通过重试恢复的暂时性任务错误。"""  # 类说明。
-
-
-# 定义致命错误类型，用于立即放弃任务并避免重试。 
-class FatalTaskError(RuntimeError):
-    """表示无需重试的不可恢复错误。"""  # 类说明。
-
-
-# 定义每个任务的输入结构，方便在线程之间传递上下文。 
+# 定义任务结构体，集中存储单个音频文件的所有派生路径。 
 @dataclass
 class PipelineTask:
-    """描述单个音频文件的处理目标。"""  # 类说明。
+    """描述单个音频文件需要的输出路径与锁路径。"""  # 类说明。
 
     input_path: Path  # 输入音频文件路径。
+    base_name: str  # 去除扩展名后的基名，复用以构造输出文件。
     words_path: Path  # 词级输出文件路径。
     segments_path: Path  # 段级输出文件路径。
-    error_path: Path  # 错误信息文件路径。
+    error_path: Path  # 错误文本输出路径。
+    lock_path: Path  # 与该输入绑定的锁文件路径。
 
 
-# 定义任务结果结构，统一记录状态与统计信息。 
+# 定义任务结果结构，便于聚合统计。 
 @dataclass
 class TaskResult:
-    """封装单个任务的执行结果。"""  # 类说明。
+    """封装任务执行后的状态、耗时与附加信息。"""  # 类说明。
 
-    input_path: Path  # 输入音频文件路径。
-    status: str  # 任务状态 success/failed。
-    attempts: int  # 实际执行次数。
-    duration: float  # 单个任务耗时（秒）。
-    outputs: List[str]  # 成功时生成的输出文件列表。
-    error: str | None  # 失败原因描述。
+    input_path: Path  # 输入文件路径。
+    status: str  # success/failed/skipped。
+    attempts: int  # 实际尝试次数。
+    duration: float  # 任务耗时（秒）。
+    outputs: List[str]  # 成功生成的文件列表。
+    error: str | None  # 失败原因文本。
+    skipped_reason: str | None = None  # 跳过原因描述。
+    stale: bool = False  # 是否因哈希失配被判定为陈旧。
+    hash_value: str | None = None  # 最新计算的音频哈希。
 
 
-# 定义任务执行上下文，包含共享资源与配置。 
+# 定义任务上下文结构，包含共享资源与配置。 
 @dataclass
 class TaskContext:
-    """为每个 worker 提供必要的共享信息。"""  # 类说明。
+    """封装 worker 执行单个任务时需要的共享状态。"""  # 类说明。
 
-    backend: Any  # 后端实例，可跨线程复用。
-    backend_name: str  # 后端名称，用于元信息写入。
-    language: str  # 默认语言配置。
+    backend: Any  # 后端实例。
+    backend_name: str  # 后端名称，用于 Manifest 与 JSON。
+    language: str  # 语言参数。
     segments_json: bool  # 是否输出段级 JSON。
-    max_retries: int  # 允许的最大重试次数。
-    task_logger: TaskLogger  # 任务级日志记录器。
-    progress: ProgressPrinter  # 进度打印实例。
+    max_retries: int  # 最大重试次数。
+    task_logger: TaskLogger  # 任务级日志器。
+    progress: ProgressPrinter  # 进度打印器。
+    skip_done: bool  # 是否跳过已完成任务。
+    overwrite: bool  # 是否覆盖已有结果。
+    force: bool  # 是否强制重跑。
+    integrity_check: bool  # 是否启用 SHA-256 校验。
+    lock_timeout: float  # 文件锁超时时间。
+    cleanup_temp: bool  # 是否清理历史临时文件。
+    manifest_path: Path  # Manifest 文件路径。
+    manifest_index: Dict[str, Dict[str, Any]]  # 运行前加载的 Manifest 索引。
+    out_dir: Path  # 输出目录路径。
 
 
-# 定义辅助函数，用于遍历输入路径并筛选音频文件。 
+# 定义兼容旧版测试的异常别名。
+class TransientTaskError(RetryableError):
+    """兼容 Round 9 测试的可重试异常别名。"""  # 类说明。
+
+
+class FatalTaskError(NonRetryableError):
+    """兼容 Round 9 测试的致命异常别名。"""  # 类说明。
+
+
+# 定义辅助函数：遍历输入路径并筛选音频文件。 
 def _scan_audio_inputs(root: Path) -> List[Path]:
-    """遍历输入路径并返回符合扩展名的音频文件列表。"""  # 函数说明。
-    # 若输入路径不存在，视为致命错误，直接抛出异常。 
+    """遍历输入路径并返回符合音频扩展名的文件列表。"""  # 函数说明。
+    # 若输入路径不存在则直接抛出异常。 
     if not root.exists():
         raise FileNotFoundError(f"Input path does not exist: {root}")
-    # 若为目录，则递归扫描并按路径排序，保持处理顺序稳定。 
+    # 若为目录则递归遍历并过滤文件。 
     if root.is_dir():
         candidates = sorted(path for path in root.rglob("*") if path.is_file())
     else:
-        # 若为单个文件，则直接构造列表。 
+        # 单文件输入直接形成列表。 
         candidates = [root]
-    # 使用 is_audio_path 过滤掉非音频文件，仅保留允许的扩展名。 
+    # 使用 is_audio_path 过滤出合法音频文件。 
     return [path for path in candidates if is_audio_path(path, ALLOWED_EXTENSIONS)]
 
 
-# 定义辅助函数，对词级数组执行单调性校验与必要的修正。 
+# 定义辅助函数：修正词级结果的时间逆序问题。 
 def _ensure_word_monotonicity(words: List[dict]) -> Tuple[List[dict], int]:
-    """扫描词级结果，修复逆序时间并统计修复次数。"""  # 函数说明。
-    # 创建新的列表，避免直接修改输入引用。 
-    fixed_words: List[dict] = []
-    # 记录发生调整的词条数量。 
-    adjusted = 0
-    # 初始化上一词结束时间。 
-    last_end = 0.0
+    """确保词级时间单调递增，并统计修正次数。"""  # 函数说明。
+    fixed_words: List[dict] = []  # 用于存放修正后的词数组。
+    adjusted = 0  # 记录需要调整的词条数量。
+    last_end = 0.0  # 记录上一词的结束时间。
     for word in words:
-        # 拷贝词条以避免污染原数据。 
-        entry = dict(word)
-        # 读取起止时间，缺失时回退到上一结束时间。 
-        start = float(entry.get("start", last_end))
-        end = float(entry.get("end", start))
-        # 若起点小于上一结束时间，则将其提升并计数。 
-        if start < last_end - EPSILON:
+        entry = dict(word)  # 拷贝词条避免修改原数据。
+        start = float(entry.get("start", last_end))  # 读取起始时间。
+        end = float(entry.get("end", start))  # 读取结束时间。
+        if start < last_end - EPSILON:  # 若起点逆序则抬升到上一结束。
             start = last_end
             adjusted += 1
-        # 若终点早于起点，则拉齐到起点位置。 
-        if end < start:
+        if end < start:  # 若终点早于起点则同步到起点。
             end = start
             adjusted += 1
-        # 更新词条中的时间字段。 
-        entry["start"] = start
-        entry["end"] = end
-        # 追加到修复后的列表。 
-        fixed_words.append(entry)
-        # 更新上一结束时间。 
-        last_end = end
-    # 返回修复后的词数组与调整次数。 
-    return fixed_words, adjusted
+        entry["start"] = start  # 写回修正后的起点。
+        entry["end"] = end  # 写回修正后的终点。
+        fixed_words.append(entry)  # 追加到新数组。
+        last_end = end  # 更新上一词结束时间。
+    return fixed_words, adjusted  # 返回修正结果与次数。
 
 
-# 定义辅助函数，构建词级与段级 JSON 载荷。 
+# 定义辅助函数：根据后端输出构建词级与段级 JSON。 
 def _build_payloads(
     audio_file: Path,
     transcription: Dict[str, Any],
     language: str,
     backend_name: str,
     segments_json: bool,
+    audio_hash: str | None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any] | None, float]:
-    """根据后端输出组装词级与段级 JSON 结构。"""  # 函数说明。
-    # 拷贝后端返回的词数组以避免共享引用。 
-    raw_words = [dict(word) for word in transcription.get("words", [])]
-    # 执行单调性校验并统计修正次数。 
-    fixed_words, adjustments = _ensure_word_monotonicity(raw_words)
-    # 拷贝段级数组并确保内部 words 字段被替换。 
-    segments_data = []
+    """依据后端结果构建 words/segments JSON 结构并返回时长。"""  # 函数说明。
+    raw_words = [dict(word) for word in transcription.get("words", [])]  # 拷贝词数组。
+    fixed_words, adjustments = _ensure_word_monotonicity(raw_words)  # 修正逆序时间。
+    segments_data = []  # 初始化段级数据容器。
     for segment in transcription.get("segments", []):
-        segment_copy = dict(segment)
-        segment_copy["words"] = [dict(word) for word in segment_copy.get("words", [])]
-        segments_data.append(segment_copy)
-    # 将修正后的词重新分配回对应段落，并更新平均置信度。 
-    segment_lookup = {segment.get("id"): segment for segment in segments_data}
+        segment_copy = dict(segment)  # 拷贝段数据。
+        segment_copy["words"] = [dict(word) for word in segment_copy.get("words", [])]  # 深拷贝子词条。
+        segments_data.append(segment_copy)  # 添加到列表。
+    segment_lookup = {segment.get("id"): segment for segment in segments_data}  # 建立段 id 索引。
     for segment in segments_data:
-        segment["words"] = []
+        segment["words"] = []  # 预先清空 words 字段。
     for word in fixed_words:
-        segment = segment_lookup.get(word.get("segment_id"))
+        segment = segment_lookup.get(word.get("segment_id"))  # 查找词所属段。
         if segment is None:
             continue
-        segment["words"].append(word)
+        segment["words"].append(word)  # 将词附加到对应段落。
     for segment in segments_data:
         confidences = [w.get("confidence") for w in segment.get("words", []) if w.get("confidence") is not None]
         if confidences:
-            segment["avg_conf"] = sum(confidences) / len(confidences)
-    # 获取时长信息，缺失时回退到 0.0，由上层再探测。 
-    duration = float(transcription.get("duration_sec") or 0.0)
-    # 拷贝元信息，写入修正统计与 schema。 
-    meta = dict(transcription.get("meta", {}))
-    if adjustments:
+            segment["avg_conf"] = sum(confidences) / len(confidences)  # 计算平均置信度。
+    duration = float(transcription.get("duration_sec") or 0.0)  # 读取后端返回的时长。
+    meta = dict(transcription.get("meta", {}))  # 拷贝元信息。
+    if adjustments:  # 若发生时间修正则写入统计信息。
         meta.setdefault("postprocess", {})
         meta["postprocess"].setdefault("word_monotonicity_fixes", adjustments)
-    meta.setdefault("schema_version", "round9")
-    # 解析语言与后端信息，补全缺失字段。 
-    resolved_language = transcription.get("language", language)
-    backend_info = transcription.get("backend", {"name": backend_name})
-    # 生成统一的生成时间戳。 
-    generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    # 组装词级 JSON 结构。 
+    meta.setdefault("schema_version", "round11")  # 更新 schema 版本标签。
+    resolved_language = transcription.get("language", language)  # 解析语言字段。
+    backend_info = transcription.get("backend", {"name": backend_name})  # 补全后端信息。
+    generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")  # 生成 UTC 时间戳。
     words_payload = {
         "schema": WORD_SCHEMA,
         "language": resolved_language,
@@ -186,14 +195,14 @@ def _build_payloads(
             "path": str(audio_file),
             "duration_sec": duration,
             "language": resolved_language,
+            "hash_sha256": audio_hash,
         },
         "backend": backend_info,
         "meta": meta,
         "words": fixed_words,
         "generated_at": generated_at,
     }
-    # 根据配置决定是否返回段级 JSON。 
-    segments_payload = None
+    segments_payload = None  # 默认不输出段级。
     if segments_json:
         segments_payload = {
             "schema": SEGMENT_SCHEMA,
@@ -202,182 +211,365 @@ def _build_payloads(
                 "path": str(audio_file),
                 "duration_sec": duration,
                 "language": resolved_language,
+                "hash_sha256": audio_hash,
             },
             "backend": backend_info,
             "meta": meta,
             "segments": segments_data,
             "generated_at": generated_at,
         }
-    # 返回词级载荷、段级载荷与时长信息。 
-    return words_payload, segments_payload, duration
+    return words_payload, segments_payload, duration  # 返回构造的载荷与时长。
 
 
-# 定义核心任务函数，负责执行单个音频文件的转写与写入。 
-def _transcribe_and_write_once(task: PipelineTask, context: TaskContext) -> Dict[str, Any]:
-    """执行一次无重试的转写流程，失败时抛出异常。"""  # 函数说明。
+# 定义辅助函数：读取现有 words.json 的音频元数据。 
+def _load_existing_audio_info(words_path: Path) -> Tuple[str | None, float | None]:
+    """尝试读取已有 words.json 的音频哈希与时长。"""  # 函数说明。
+    if not words_path.exists():
+        return None, None
     try:
-        # 调用后端执行转写，可能抛出后端自定义异常。 
-        transcription = context.backend.transcribe_file(str(task.input_path))
-        # 根据后端输出构建词级与段级 JSON。 
+        with words_path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except Exception:  # noqa: BLE001
+        return None, None
+    audio = data.get("audio", {})
+    hash_value = audio.get("hash_sha256")
+    duration = audio.get("duration_sec")
+    return (str(hash_value) if hash_value else None, float(duration) if duration is not None else None)
+
+
+# 定义辅助函数：生成 Manifest 时间戳。 
+def _manifest_timestamp() -> str:
+    """返回当前 UTC 时间戳的 ISO8601 字符串。"""  # 函数说明。
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+# 定义执行一次转写与写入的函数。 
+def _transcribe_and_write_once(
+    task: PipelineTask,
+    context: TaskContext,
+    audio_hash: str | None,
+) -> Dict[str, Any]:
+    """执行一次转写调用并落盘，失败时抛出异常。"""  # 函数说明。
+    try:
+        transcription = context.backend.transcribe_file(str(task.input_path))  # 调用后端完成转写。
         words_payload, segments_payload, duration = _build_payloads(
             task.input_path,
             transcription,
             context.language,
             context.backend_name,
             context.segments_json,
+            audio_hash,
         )
-        # 若后端未提供时长，则使用 ffprobe 探测补全。 
-        if duration <= 0:
+        if duration <= 0:  # 若后端未返回时长则调用 probe_duration 探测。
             duration = probe_duration(str(task.input_path))
             words_payload["audio"]["duration_sec"] = duration
             if segments_payload is not None:
                 segments_payload["audio"]["duration_sec"] = duration
-        # 在写入前确保错误文件被清理。 
-        task.error_path.unlink(missing_ok=True)
-        # 以原子方式写入词级 JSON。 
-        atomic_write_json(task.words_path, words_payload)
-        # 视情况写入段级 JSON。 
+        task.error_path.unlink(missing_ok=True)  # 在写入前移除旧的错误文件。
+        atomic_write_json(task.words_path, words_payload)  # 原子写入词级 JSON。
+        outputs = [str(task.words_path)]  # 初始化输出列表。
         if context.segments_json and segments_payload is not None:
             atomic_write_json(task.segments_path, segments_payload)
-        # 返回本次写入的辅助信息，供统计使用。 
-        return {
-            "duration": duration,
-            "outputs": [str(task.words_path)]
-            + ([str(task.segments_path)] if context.segments_json and segments_payload is not None else []),
-        }
-    except TransientTaskError:
-        # 已经被明确标记为可重试错误，直接抛出交由上层处理。 
-        raise
-    except FatalTaskError:
-        # 已经被明确标记为致命错误，直接向上传递。 
-        raise
+            outputs.append(str(task.segments_path))
+        return {"duration": duration, "outputs": outputs}  # 返回写入结果供统计使用。
+    except RetryableError:
+        raise  # 已有明确分类的可重试错误直接抛出。
+    except NonRetryableError:
+        raise  # 不可重试错误直接抛出给上层。
     except OSError as exc:
-        # 针对常见的可重试错误码（如 EAGAIN、EBUSY、EIO）做特殊处理。 
-        if exc.errno in {errno.EAGAIN, errno.EBUSY, errno.EIO}:
+        if exc.errno in {errno.EAGAIN, errno.EBUSY, errno.EIO, errno.ETIMEDOUT}:  # 常见的暂时性 I/O 错误。
             raise TransientTaskError(f"Transient I/O error: {exc}") from exc
-        # 其余 OSError 多为权限或路径问题，视为致命错误。 
-        raise FatalTaskError(f"Fatal I/O error: {exc}") from exc
-    except Exception:
-        # 未知异常保持原状交由重试装饰器分类。 
-        raise
-
-
-# 定义包裹重试与日志的任务执行函数。 
-def _process_one(task: PipelineTask, context: TaskContext) -> TaskResult:
-    """执行带重试的任务并返回结构化结果。"""  # 函数说明。
-    # 记录开始日志并初始化耗时计算。 
-    context.task_logger.start(str(task.input_path))
-    start_time = time.monotonic()
-    # 初始化尝试计数，借助列表实现可变闭包。 
-    attempts = {"value": 0}
-    # 定义重试回调，用于在每次失败时输出日志。 
-    def _on_retry(attempt: int, exc: Exception) -> None:
-        context.task_logger.retry(str(task.input_path), attempt, exc)
-    # 装饰实际的执行函数以应用重试逻辑。 
-    @retry(
-        max_retries=max(context.max_retries, 0),
-        backoff=2.0,
-        jitter=True,
-        retriable_exceptions=(TransientTaskError,),
-        giveup_exceptions=(FatalTaskError,),
-        on_retry=_on_retry,
-    )
-    def _execute() -> Dict[str, Any]:
-        # 每次尝试前递增计数。 
-        attempts["value"] += 1
-        # 调用一次真正的写入逻辑。 
-        return _transcribe_and_write_once(task, context)
-    # 初始化状态消息，用于进度展示。 
-    progress_message = "ok"
-    try:
-        # 在真正执行前再次校验输出目录的写权限。 
-        if not os.access(task.words_path.parent, os.W_OK):
-            raise FatalTaskError(f"Output directory not writable: {task.words_path.parent}")
-        # 执行带重试的任务。 
-        result = _execute()
-        # 计算耗时。 
-        duration = time.monotonic() - start_time
-        # 输出成功日志。 
-        context.task_logger.success(str(task.input_path), duration, attempts["value"], result["outputs"])
-        # 返回成功结果。 
-        return TaskResult(
-            input_path=task.input_path,
-            status="success",
-            attempts=attempts["value"],
-            duration=duration,
-            outputs=result["outputs"],
-            error=None,
-        )
-    except RetryError as exc:
-        # 标记进度提示为失败。 
-        progress_message = "fail"
-        # 计算耗时。 
-        duration = time.monotonic() - start_time
-        # 记录失败日志，包含最后一次异常信息。 
-        context.task_logger.failure(str(task.input_path), attempts["value"], exc.last_exception)
-        # 准备错误信息文本。 
-        reason = f"{exc.last_exception.__class__.__name__}: {exc.last_exception}"
-        # 格式化原始堆栈信息。 
-        traceback_text = "".join(
-            traceback.format_exception(
-                exc.last_exception.__class__, exc.last_exception, exc.last_exception.__traceback__
-            )
-        )
-        # 写入错误文件。 
-        atomic_write_text(task.error_path, f"{reason}\n{traceback_text}")
-        # 返回失败结果。 
-        return TaskResult(
-            input_path=task.input_path,
-            status="failed",
-            attempts=attempts["value"],
-            duration=duration,
-            outputs=[],
-            error=reason,
-        )
-    except FatalTaskError as exc:
-        # 标记进度提示为失败。 
-        progress_message = "fail"
-        # 计算耗时。 
-        duration = time.monotonic() - start_time
-        # 输出失败日志。 
-        context.task_logger.failure(str(task.input_path), attempts.get("value", 1) or 1, exc)
-        # 写入错误文件。 
-        atomic_write_text(task.error_path, f"FatalTaskError: {exc}\n")
-        # 返回失败结果。 
-        return TaskResult(
-            input_path=task.input_path,
-            status="failed",
-            attempts=attempts.get("value", 1) or 1,
-            duration=duration,
-            outputs=[],
-            error=f"FatalTaskError: {exc}",
-        )
+        raise FatalTaskError(f"Fatal I/O error: {exc}") from exc  # 其他 I/O 错误视为不可重试。
     except Exception as exc:  # noqa: BLE001
-        # 标记进度提示为失败。 
-        progress_message = "fail"
-        # 计算耗时。 
-        duration = time.monotonic() - start_time
-        # 输出失败日志。 
-        context.task_logger.failure(str(task.input_path), attempts.get("value", 1) or 1, exc)
-        # 写入错误文件并包含堆栈。 
-        traceback_text = traceback.format_exc()
-        atomic_write_text(task.error_path, f"{exc.__class__.__name__}: {exc}\n{traceback_text}")
-        # 对未知异常进行包装返回。 
+        raise TransientTaskError(f"Unknown backend error: {exc}") from exc  # 默认回退为可重试错误。
+
+
+# 定义任务执行函数，负责锁定、哈希校验与 Manifest 记录。 
+def _process_one(task: PipelineTask, context: TaskContext) -> TaskResult:
+    """执行单个任务的完整生命周期并返回结果。"""  # 函数说明。
+    context.task_logger.start(str(task.input_path))  # 输出开始日志。
+    start_time = time.monotonic()  # 记录起始时间。
+    attempts = {"value": 0}  # 可变字典用于记录尝试次数。
+    # 根据配置计算音频哈希，缺失时置为 None。 
+    audio_hash: str | None = None
+    if context.integrity_check:
+        try:
+            audio_hash = sha256_file(task.input_path)
+        except FileNotFoundError as exc:
+            reason = f"NonRetryableError: {exc}"
+            atomic_write_text(task.error_path, f"{reason}\n")
+            manifest_append_record(
+                context.manifest_path,
+                {
+                    "ts": _manifest_timestamp(),
+                    "input": str(task.input_path),
+                    "input_hash_sha256": None,
+                    "status": "failed",
+                    "backend": context.backend_name,
+                    "out": {},
+                    "duration_sec": 0.0,
+                    "elapsed_sec": 0.0,
+                    "error": {"type": "NonRetryableError", "message": str(exc)},
+                },
+            )
+            return TaskResult(
+                input_path=task.input_path,
+                status="failed",
+                attempts=0,
+                duration=0.0,
+                outputs=[],
+                error=reason,
+            )
+    # 若需要清理残留临时文件，可在加锁后执行。 
+    try:
+        with with_file_lock(task.lock_path, context.lock_timeout):
+            if context.cleanup_temp:
+                cleanup_partials(context.out_dir, task.base_name)
+            words_exists = file_exists(task.words_path)
+            segments_exists = file_exists(task.segments_path) if context.segments_json else True
+            outputs_ready = words_exists and segments_exists
+            existing_hash, existing_duration = _load_existing_audio_info(task.words_path)
+            skip_reason = None
+            stale = False
+            if not context.force and outputs_ready:
+                if context.integrity_check and audio_hash and existing_hash:
+                    if existing_hash == audio_hash and context.skip_done and not context.overwrite:
+                        skip_reason = "completed"
+                    elif existing_hash != audio_hash and not context.overwrite:
+                        skip_reason = "stale"
+                        stale = True
+                if skip_reason is None and not context.overwrite:
+                    if context.skip_done:
+                        skip_reason = "completed"
+                    else:
+                        skip_reason = "exists"
+            if skip_reason is not None:
+                context.task_logger.skipped(str(task.input_path), skip_reason)
+                task.error_path.unlink(missing_ok=True)
+                error_payload = (
+                    {"type": "StaleResult", "message": "stale result; use --overwrite true to rebuild"}
+                    if stale
+                    else {"type": "Skip", "message": skip_reason}
+                )
+                manifest_append_record(
+                    context.manifest_path,
+                    {
+                        "ts": _manifest_timestamp(),
+                        "input": str(task.input_path),
+                        "input_hash_sha256": audio_hash or existing_hash,
+                        "status": "skipped",
+                        "backend": context.backend_name,
+                        "out": {
+                            "words": str(task.words_path) if words_exists else None,
+                            "segments": str(task.segments_path) if segments_exists and context.segments_json else None,
+                        },
+                        "duration_sec": existing_duration or 0.0,
+                        "elapsed_sec": time.monotonic() - start_time,
+                        "error": error_payload,
+                    },
+                )
+                message = "stale" if stale else skip_reason
+                context.progress.update(message)
+                return TaskResult(
+                    input_path=task.input_path,
+                    status="skipped",
+                    attempts=0,
+                    duration=time.monotonic() - start_time,
+                    outputs=[str(task.words_path)] if words_exists else [],
+                    error=None,
+                    skipped_reason=skip_reason,
+                    stale=stale,
+                    hash_value=audio_hash or existing_hash,
+                )
+            task.error_path.unlink(missing_ok=True)
+            manifest_append_record(
+                context.manifest_path,
+                {
+                    "ts": _manifest_timestamp(),
+                    "input": str(task.input_path),
+                    "input_hash_sha256": audio_hash,
+                    "status": "started",
+                    "backend": context.backend_name,
+                    "out": {},
+                    "duration_sec": 0.0,
+                    "elapsed_sec": 0.0,
+                    "error": None,
+                },
+            )
+            def _on_retry(attempt: int, exc: Exception) -> None:
+                context.task_logger.retry(str(task.input_path), attempt, exc)
+            @retry(
+                max_retries=max(context.max_retries, 0),
+                backoff=2.0,
+                jitter=True,
+                retriable_exceptions=(RetryableError,),
+                giveup_exceptions=(NonRetryableError,),
+                on_retry=_on_retry,
+            )
+            def _execute() -> Dict[str, Any]:
+                attempts["value"] += 1
+                return _transcribe_and_write_once(task, context, audio_hash)
+            try:
+                result = _execute()
+                duration = time.monotonic() - start_time
+                context.task_logger.success(str(task.input_path), duration, attempts["value"], result["outputs"])
+                manifest_append_record(
+                    context.manifest_path,
+                    {
+                        "ts": _manifest_timestamp(),
+                        "input": str(task.input_path),
+                        "input_hash_sha256": audio_hash,
+                        "status": "succeeded",
+                        "backend": context.backend_name,
+                        "out": {
+                            "words": str(task.words_path),
+                            "segments": str(task.segments_path) if context.segments_json else None,
+                        },
+                        "duration_sec": result.get("duration", 0.0),
+                        "elapsed_sec": duration,
+                        "error": None,
+                    },
+                )
+                context.progress.update("ok")
+                return TaskResult(
+                    input_path=task.input_path,
+                    status="success",
+                    attempts=attempts["value"],
+                    duration=duration,
+                    outputs=result["outputs"],
+                    error=None,
+                    hash_value=audio_hash,
+                )
+            except RetryError as exc:
+                duration = time.monotonic() - start_time
+                context.task_logger.failure(str(task.input_path), attempts["value"], exc.last_exception)
+                reason = f"{exc.last_exception.__class__.__name__}: {exc.last_exception}"
+                traceback_text = "".join(
+                    traceback.format_exception(
+                        exc.last_exception.__class__, exc.last_exception, exc.last_exception.__traceback__
+                    )
+                )
+                atomic_write_text(task.error_path, f"{reason}\n{traceback_text}")
+                manifest_append_record(
+                    context.manifest_path,
+                    {
+                        "ts": _manifest_timestamp(),
+                        "input": str(task.input_path),
+                        "input_hash_sha256": audio_hash,
+                        "status": "failed",
+                        "backend": context.backend_name,
+                        "out": {},
+                        "duration_sec": 0.0,
+                        "elapsed_sec": duration,
+                        "error": {
+                            "type": classify_exception(exc.last_exception),
+                            "message": reason,
+                        },
+                    },
+                )
+                if context.cleanup_temp:
+                    cleanup_partials(context.out_dir, task.base_name)
+                context.progress.update("fail")
+                return TaskResult(
+                    input_path=task.input_path,
+                    status="failed",
+                    attempts=attempts["value"],
+                    duration=duration,
+                    outputs=[],
+                    error=reason,
+                    hash_value=audio_hash,
+                )
+            except NonRetryableError as exc:
+                duration = time.monotonic() - start_time
+                context.task_logger.failure(str(task.input_path), attempts.get("value", 1), exc)
+                atomic_write_text(task.error_path, f"NonRetryableError: {exc}\n")
+                manifest_append_record(
+                    context.manifest_path,
+                    {
+                        "ts": _manifest_timestamp(),
+                        "input": str(task.input_path),
+                        "input_hash_sha256": audio_hash,
+                        "status": "failed",
+                        "backend": context.backend_name,
+                        "out": {},
+                        "duration_sec": 0.0,
+                        "elapsed_sec": duration,
+                        "error": {"type": "non-retryable", "message": str(exc)},
+                    },
+                )
+                if context.cleanup_temp:
+                    cleanup_partials(context.out_dir, task.base_name)
+                context.progress.update("fail")
+                return TaskResult(
+                    input_path=task.input_path,
+                    status="failed",
+                    attempts=attempts.get("value", 1),
+                    duration=duration,
+                    outputs=[],
+                    error=str(exc),
+                    hash_value=audio_hash,
+                )
+            except Exception as exc:  # noqa: BLE001
+                duration = time.monotonic() - start_time
+                context.task_logger.failure(str(task.input_path), attempts.get("value", 1), exc)
+                traceback_text = traceback.format_exc()
+                atomic_write_text(task.error_path, f"{exc.__class__.__name__}: {exc}\n{traceback_text}")
+                manifest_append_record(
+                    context.manifest_path,
+                    {
+                        "ts": _manifest_timestamp(),
+                        "input": str(task.input_path),
+                        "input_hash_sha256": audio_hash,
+                        "status": "failed",
+                        "backend": context.backend_name,
+                        "out": {},
+                        "duration_sec": 0.0,
+                        "elapsed_sec": duration,
+                        "error": {"type": "unknown", "message": str(exc)},
+                    },
+                )
+                if context.cleanup_temp:
+                    cleanup_partials(context.out_dir, task.base_name)
+                context.progress.update("fail")
+                return TaskResult(
+                    input_path=task.input_path,
+                    status="failed",
+                    attempts=attempts.get("value", 1),
+                    duration=duration,
+                    outputs=[],
+                    error=f"{exc.__class__.__name__}: {exc}",
+                    hash_value=audio_hash,
+                )
+    except TimeoutError as exc:
+        context.task_logger.skipped(str(task.input_path), "lock-timeout")
+        manifest_append_record(
+            context.manifest_path,
+            {
+                "ts": _manifest_timestamp(),
+                "input": str(task.input_path),
+                "input_hash_sha256": audio_hash,
+                "status": "skipped",
+                "backend": context.backend_name,
+                "out": {},
+                "duration_sec": 0.0,
+                "elapsed_sec": time.monotonic() - start_time,
+                "error": {"type": "LockTimeout", "message": str(exc)},
+            },
+        )
+        context.progress.update("lock")
         return TaskResult(
             input_path=task.input_path,
-            status="failed",
-            attempts=attempts.get("value", 1) or 1,
-            duration=duration,
+            status="skipped",
+            attempts=0,
+            duration=time.monotonic() - start_time,
             outputs=[],
-            error=f"{exc.__class__.__name__}: {exc}",
+            error=None,
+            skipped_reason="lock-timeout",
+            hash_value=audio_hash,
         )
-    finally:
-        # 在 finally 块中更新进度，无论成功或失败都会执行。 
-        if context.progress is not None:
-            context.progress.update(progress_message)
 
 
-# 定义主运行函数，整合扫描、并发执行与统计逻辑。 
+# 定义主运行函数，协调扫描、并发执行与 Manifest。 
 def run(
     input_path: str,
     out_dir: str,
@@ -401,21 +593,21 @@ def run(
     rate_limit: float = 0.0,
     skip_done: bool = True,
     fail_fast: bool = False,
+    integrity_check: bool = True,
+    lock_timeout: float = 30.0,
+    cleanup_temp: bool = True,
+    manifest_path: str | None = None,
+    force: bool = False,
     **legacy_kwargs,
 ) -> dict:
     """执行批量音频转写并返回统计摘要。"""  # 函数说明。
-    # 兼容旧参数名称 write_segments，若存在则覆盖 segments_json。 
     if "write_segments" in legacy_kwargs:
         segments_json = legacy_kwargs.pop("write_segments")
-    # 兼容旧的 num_workers 参数（Round 8 前），直接丢弃避免冲突。 
     legacy_kwargs.pop("num_workers", None)
-    # 若仍有未知参数，则抛出错误提示调用者更新调用方式。 
     if legacy_kwargs:
         unsupported = ", ".join(sorted(legacy_kwargs.keys()))
         raise TypeError(f"Unsupported arguments for pipeline.run: {unsupported}")
-    # 获取项目统一的日志器，根据 verbose 控制输出级别。 
     logger = get_logger(verbose)
-    # 在详细模式下打印当前配置，帮助调试。 
     if verbose:
         logger.debug(
             "Pipeline configuration input=%s out_dir=%s backend=%s workers=%d max_retries=%d rate_limit=%s skip_done=%s fail_fast=%s",
@@ -428,20 +620,18 @@ def run(
             skip_done,
             fail_fast,
         )
-    # 将输入与输出路径转换为 Path 对象以便后续操作。 
     input_path_obj = Path(input_path)
     out_dir_obj = Path(out_dir)
-    # 扫描输入路径并获取待处理音频列表。 
+    manifest_path_obj = Path(manifest_path) if manifest_path else out_dir_obj / "_manifest.jsonl"
     audio_files = _scan_audio_inputs(input_path_obj)
-    # 在详细模式下打印扫描到的文件列表。 
     if verbose:
         logger.debug("Scanned %d candidate audio files", len(audio_files))
         for path in audio_files:
             logger.debug(" - %s", path)
-    # 非 dry-run 模式下，确保输出目录存在。 
     if not dry_run:
         safe_mkdirs(out_dir_obj)
-    # 构建传递给后端的参数字典，集中管理推理选项。 
+        safe_mkdirs(manifest_path_obj.parent)
+    manifest_index = manifest_load_index(manifest_path_obj) if manifest_path_obj.exists() else {}
     backend_kwargs = {
         "model": model,
         "language": language,
@@ -454,52 +644,32 @@ def run(
         "best_of": best_of,
         "patience": patience,
     }
-    # 使用工厂函数实例化后端，可能抛出更高层需要关注的错误。 
     backend = create_transcriber(backend_name, **backend_kwargs)
-    # 创建任务级日志器。 
     task_logger = TaskLogger(logger, verbose)
-    # 初始化跳过记录与任务列表。 
     skipped_items: List[dict] = []
     planned_count = 0
     tasks: List[PipelineTask] = []
     for audio_file in audio_files:
-        # 生成基础名称用于拼接输出文件路径。 
         base_name = Path(path_sans_ext(audio_file)).name
         words_path = out_dir_obj / f"{base_name}.words.json"
         segments_path = out_dir_obj / f"{base_name}.segments.json"
         error_path = out_dir_obj / f"{base_name}.error.txt"
-        # dry-run 模式仅记录计划并跳过实际执行。 
+        lock_path = out_dir_obj / f"{base_name}.lock"
         if dry_run:
             task_logger.skipped(str(audio_file), "dry-run")
             planned_count += 1
             continue
-        # 检查输出文件是否已存在，便于处理跳过或覆盖逻辑。 
-        words_exists = file_exists(words_path)
-        segments_exists = file_exists(segments_path) if segments_json else True
-        outputs_ready = words_exists and segments_exists
-        # skip_done 为 true 且输出完整时直接跳过。 
-        if skip_done and outputs_ready and not overwrite:
-            task_logger.skipped(str(audio_file), "completed")
-            skipped_items.append({"input": str(audio_file), "reason": "completed"})
-            error_path.unlink(missing_ok=True)
-            continue
-        # 即使 skip_done 为 false，只要禁止覆盖也不应重写已有结果。 
-        if outputs_ready and not overwrite and not skip_done:
-            task_logger.skipped(str(audio_file), "exists")
-            skipped_items.append({"input": str(audio_file), "reason": "exists"})
-            error_path.unlink(missing_ok=True)
-            continue
-        # 将任务加入待处理列表。 
         tasks.append(
             PipelineTask(
                 input_path=audio_file,
+                base_name=base_name,
                 words_path=words_path,
                 segments_path=segments_path,
                 error_path=error_path,
+                lock_path=lock_path,
             )
         )
-    # 若任务列表为空，则直接返回跳过统计。 
-    if dry_run and not tasks:
+    if dry_run:
         return {
             "total": len(audio_files),
             "queued": 0,
@@ -511,9 +681,12 @@ def run(
             "retried_count": 0,
             "elapsed_sec": 0.0,
             "out_dir": str(out_dir_obj),
+            "manifest_path": str(manifest_path_obj),
             "errors": [],
             "outputs": [],
-            "skipped_items": [],
+            "skipped_items": skipped_items,
+            "skipped_stale": 0,
+            "lock_conflicts": 0,
         }
     if not tasks:
         return {
@@ -522,18 +695,19 @@ def run(
             "processed": 0,
             "succeeded": 0,
             "failed": 0,
-            "skipped": len(skipped_items),
+            "skipped": 0,
             "cancelled": 0,
             "retried_count": 0,
             "elapsed_sec": 0.0,
             "out_dir": str(out_dir_obj),
+            "manifest_path": str(manifest_path_obj),
             "errors": [],
             "outputs": [],
             "skipped_items": skipped_items,
+            "skipped_stale": 0,
+            "lock_conflicts": 0,
         }
-    # 创建进度打印器，verbose 模式下交由 TaskLogger 输出，仍保留进度条。 
     progress = ProgressPrinter(len(tasks), "processing", enabled=True)
-    # 构造任务上下文。 
     context = TaskContext(
         backend=backend,
         backend_name=backend_name,
@@ -542,15 +716,21 @@ def run(
         max_retries=max_retries,
         task_logger=task_logger,
         progress=progress,
+        skip_done=skip_done,
+        overwrite=overwrite,
+        force=force,
+        integrity_check=integrity_check,
+        lock_timeout=lock_timeout,
+        cleanup_temp=cleanup_temp,
+        manifest_path=manifest_path_obj,
+        manifest_index=manifest_index,
+        out_dir=out_dir_obj,
     )
-    # 记录整体开始时间。 
     start_time = time.monotonic()
-    # 定义 worker 函数以适配线程池接口。 
-    def _worker(task: PipelineTask) -> TaskResult:
-        return _process_one(task, context)
-    # 使用线程池执行任务，应用限流与 fail-fast。 
-    def _stop_condition(result: Any) -> bool:  # 定义 fail-fast 的停止条件。
-        return isinstance(result, TaskResult) and result.status == "failed"  # 仅当任务失败时触发。
+    def _worker(task_item: PipelineTask) -> TaskResult:
+        return _process_one(task_item, context)
+    def _stop_condition(result: Any) -> bool:
+        return isinstance(result, TaskResult) and result.status == "failed"
     results, submitted, _completed = run_with_threadpool(
         tasks,
         _worker,
@@ -559,27 +739,28 @@ def run(
         fail_fast=fail_fast,
         stop_condition=_stop_condition if fail_fast else None,
     )
-    # 所有任务执行完毕后关闭进度条。 
     progress.close()
-    # 计算总耗时。 
     elapsed = time.monotonic() - start_time
-    # 初始化统计计数。 
     processed = 0
     succeeded = 0
     failed = 0
     retried_count = 0
     outputs: List[str] = []
     errors: List[dict] = []
-    # 遍历结果列表并聚合统计。 
+    skipped_count = 0
+    skipped_stale = 0
+    lock_conflicts = 0
     for index, item in enumerate(results):
         if isinstance(item, TaskResult):
-            processed += 1
-            retried_count += max(0, item.attempts - 1)
             if item.status == "success":
+                processed += 1
                 succeeded += 1
+                retried_count += max(0, item.attempts - 1)
                 outputs.extend(item.outputs)
-            else:
+            elif item.status == "failed":
+                processed += 1
                 failed += 1
+                retried_count += max(0, item.attempts - 1)
                 errors.append(
                     {
                         "input": str(tasks[index].input_path),
@@ -588,6 +769,14 @@ def run(
                         "error_path": str(tasks[index].error_path),
                     }
                 )
+            elif item.status == "skipped":
+                skipped_count += 1
+                reason = item.skipped_reason or "skipped"
+                if item.stale:
+                    skipped_stale += 1
+                if reason == "lock-timeout":
+                    lock_conflicts += 1
+                skipped_items.append({"input": str(tasks[index].input_path), "reason": reason})
         elif isinstance(item, Exception):
             processed += 1
             failed += 1
@@ -600,7 +789,6 @@ def run(
                 }
             )
         elif item is not None:
-            # 理论上不会出现其他类型，如出现则视为失败。 
             processed += 1
             failed += 1
             errors.append(
@@ -611,23 +799,24 @@ def run(
                     "error_path": str(tasks[index].error_path),
                 }
             )
-    # 计算取消数量（未提交或未处理的任务）。 
     cancelled = len(tasks) - submitted
-    # 汇总统计信息。 
+    queued = processed + max(cancelled, 0)
     summary = {
         "total": len(audio_files),
-        "queued": len(tasks),
+        "queued": queued,
         "processed": processed,
         "succeeded": succeeded,
         "failed": failed,
-        "skipped": len(skipped_items),
+        "skipped": skipped_count,
         "cancelled": max(cancelled, 0),
         "retried_count": retried_count,
         "elapsed_sec": elapsed,
         "out_dir": str(out_dir_obj),
+        "manifest_path": str(manifest_path_obj),
         "errors": errors,
         "outputs": outputs,
         "skipped_items": skipped_items,
+        "skipped_stale": skipped_stale,
+        "lock_conflicts": lock_conflicts,
     }
-    # 返回最终汇总信息，供 CLI 或测试使用。 
     return summary

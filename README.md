@@ -730,3 +730,45 @@ python -m src.cli.main \
   - 将 `threads` 设为物理核心数、`beam_size` 设为 1~3 可显著降低延迟。
   - 关闭 `print_progress` 以减少 IO 开销；批量任务可结合 Round 9 的 `--num-workers` 并发能力。
 
+
+## Round 11：I/O 完整性、文件锁与断点续跑
+在并发批处理的基础上，Round 11 聚焦“落盘可靠性”。本轮实现跨平台文件锁、输入哈希校验、部分产物识别与 Manifest 追踪，确保在并发、重跑、崩溃恢复等场景下仍能获得可信且可审计的结果。
+
+### 为什么需要文件锁与哈希
+* **跨进程/多线程安全**：`<name>.lock` 文件配合 `fcntl/msvcrt` 实现独占锁，同一音频在任意时刻只会被一个工作者处理，避免重复写入与竞争条件。
+* **输入完整性保障**：在写入 `*.words.json` / `*.segments.json` 时记录 `audio.hash_sha256`，下次运行会重新计算哈希并比对，快速识别“陈旧”产物。
+* **断点续跑有据可查**：即使执行中断，也能通过哈希与 Manifest 判断哪些文件已经安全落盘、哪些需要重试或强制覆盖。
+
+### Manifest 的作用
+* **统一追踪**：所有任务会在 `out/_manifest.jsonl` 追加 `started/succeeded/failed/skipped` 记录，包含输入路径、哈希值、耗时、输出文件与错误分类。
+* **故障审计**：Manifest 会记录 `RetryableError`/`NonRetryableError`/`StaleResult` 等类型，便于区分临时性故障与需要人工介入的问题。
+* **断点恢复**：结合 `load_index` 可快速加载最新状态，判断是否需要重跑或直接跳过，同时 `--force` 可强制忽略历史记录。
+
+### 新增 CLI 参数
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--integrity-check true|false` | `true` | 是否计算 SHA-256 并写入/比对 `audio.hash_sha256`。关闭后会跳过哈希计算以提升性能。 |
+| `--lock-timeout <sec>` | `30` | 获取 `<name>.lock` 的超时时间（秒），超时会记录 `LockTimeout` 并跳过任务。 |
+| `--cleanup-temp true|false` | `true` | 是否在持锁后清理历史 `.tmp/.partial/.lock` 残留，避免崩溃遗留半成品。 |
+| `--manifest-path <path>` | `out/_manifest.jsonl` | 指定 Manifest 输出位置，可指向共享目录以跨进程统计。 |
+| `--force true|false` | `false` | 忽略现有产物与 Manifest 记录，强制对所有输入重新转写。 |
+
+### 示例命令
+```bash
+# 启用完整性校验与文件锁（默认即开启）
+python -m src.cli.main \
+  --input ./audio_dir \
+  --backend faster-whisper \
+  --num-workers 4 \
+  --integrity-check true \
+  --lock-timeout 30 \
+  --segments-json true \
+  --verbose
+```
+
+### 故障排查
+* **一直等待锁**：检查是否有其它进程仍在处理同一文件，必要时增大 `--lock-timeout` 或主动终止僵尸进程。
+* **“stale result; use --overwrite true to rebuild”**：输入文件内容已变更但未开启覆盖，使用 `--overwrite true` 或 `--force true` 重新生成。
+* **残留 `.tmp/.partial` 文件**：确认 `--cleanup-temp true` 已开启，或手动删除输出目录中的临时文件后再运行。
+* **Manifest 体积过大**：可定期将 `out/_manifest.jsonl` 归档至其它位置，并按日期切分；读取历史记录时利用 `load_index` 或按需 grep 指定日期。
+
