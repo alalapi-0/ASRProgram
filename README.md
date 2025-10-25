@@ -68,6 +68,94 @@ Python 解释器: /usr/bin/python3
 
 > **提示**：Round 5 才会启用真实安装、模型下载与按平台分流的 `ffmpeg` 获取策略；当前轮次仅做准备与环境评估。
 
+## Round 5：一键安装（实际执行）
+Round 5 中，我们将演练脚本升级为**真实可执行的安装流程**，但仍坚持“不下载模型”的约束。`setup.sh`/`setup.ps1` 会完成虚拟环境创建、pip 依赖安装、尝试安装 CPU 版 `torch`，并自动准备系统或缓存中的 `ffmpeg/ffprobe`。脚本的末尾会运行增强版 `scripts/verify_env.py`，输出 Python 包与多媒体工具的版本信息。
+
+### 新增依赖清单
+`requirements.txt` 已更新为最小可用集：
+
+```
+faster-whisper>=1.0.0
+numpy>=1.23
+soundfile>=0.12
+tqdm>=4.66
+PyYAML>=6.0
+requests>=2.31
+```
+
+`torch` 不在 requirements 中，由安装脚本根据平台尝试安装 CPU 轮子；若失败，脚本仅提示后续操作并继续执行。
+
+### 安装脚本参数对照
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--check-only true|false` / `-check-only true|false` | `false` | 是否仅执行计划与体检；`true` 时不会创建虚拟环境或下载 `ffmpeg` |
+| `--python <path>` / `-python <path>` | 自动探测 | 指定用于创建虚拟环境的 Python，可用于选择特定版本 |
+| `--use-system-ffmpeg true|false` / `-use-system-ffmpeg true|false` | `true` | `true` 时若系统已有 `ffmpeg`/`ffprobe` 将直接复用 |
+| `--cache-dir <path>` / `-cache-dir <path>` | `.cache` | 下载静态 `ffmpeg` 时的缓存位置，同时用于后续模型缓存 |
+| `--venv-dir <path>` / `-venv-dir <path>` | `.venv` | 虚拟环境所在目录，可按需放置在外部磁盘 |
+| `--extra-index-url <url>` / `-extra-index-url <url>` | *未指定* | 附加 pip 镜像索引，适用于企业代理或国内镜像 |
+
+### 典型命令
+```bash
+# Linux / macOS（Bash）
+bash scripts/setup.sh \
+  --python "$(which python3)" \
+  --use-system-ffmpeg false \
+  --cache-dir .cache \
+  --venv-dir .venv
+
+# Windows PowerShell（pwsh）
+pwsh -File scripts/setup.ps1 `
+  -python "C:\Python310\python.exe" `
+  -use-system-ffmpeg false `
+  -cache-dir ".cache" `
+  -venv-dir ".venv"
+
+# 仅体检（不做安装）
+bash scripts/setup.sh --check-only true
+pwsh -File scripts/setup.ps1 -check-only true
+```
+
+### ffmpeg/ffprobe 处理策略
+1. **优先复用系统安装**：若 `which ffmpeg` 或 `Get-Command ffmpeg` 成功，脚本会直接使用现有二进制。
+2. **下载静态构建（落地于 `.cache/ffmpeg/`）**：
+   - Linux：使用 johnvansickle 提供的 `ffmpeg-release-amd64-static.tar.xz`。
+   - macOS：使用 yt-dlp 团队维护的 `ffmpeg-master-latest-macos64-static` 压缩包。
+   - Windows：使用 gyan.dev 的 `ffmpeg-git-essentials.7z`，需要系统具备 `7z` 命令（可通过 Chocolatey 或 winget 安装 7-Zip）。
+3. **临时修改 PATH**：下载完成后仅在当前脚本会话内注入 `bin/` 目录，避免污染用户环境。
+
+所有下载文件会放在 `.cache/ffmpeg/` 下，并已通过 `.gitignore` 排除，不会被提交到仓库。
+
+### 样例输出片段
+```
+[INFO] 正在创建虚拟环境：/path/to/repo/.venv
+... pip install 日志 ...
+[INFO] torch CPU 版安装成功。
+[INFO] 已检测到系统 ffmpeg/ffprobe：/usr/bin/ffmpeg
+=== 核心依赖检测 ===
+OK: faster-whisper 1.0.1
+OK: numpy 1.26.4
+=== 多媒体工具版本 ===
+ffmpeg: ffmpeg version 6.1.1-static ...
+ffprobe: ffprobe version 6.1.1-static ...
+OK: 核心依赖已就绪。
+```
+
+### 常见问题排查
+- **torch 安装失败**：
+  - Linux/Windows CPU 环境：手动执行 `pip install torch --index-url https://download.pytorch.org/whl/cpu`。
+  - Apple Silicon：使用 `pip install torch --extra-index-url https://download.pytorch.org/whl/cpu`，或参考 PyTorch 官方说明选择 nightly 轮子。
+  - GPU 环境：根据 CUDA 版本选择合适的官方索引链接，确保仍在虚拟环境中安装。
+- **ffmpeg 下载失败**：
+  - Linux：`sudo apt install ffmpeg` 或 `sudo yum install ffmpeg`。
+  - macOS：`brew install ffmpeg`。
+  - Windows：`winget install --id Gyan.FFmpeg` 或 `choco install ffmpeg`。
+  - 若网络受限，可离线下载压缩包后放置到 `.cache/ffmpeg/` 并手动解压。
+- **企业代理或离线环境**：使用 `--extra-index-url https://mirrors.aliyun.com/pypi/simple/` 等镜像源，必要时结合 `pip config set global.trusted-host`。
+
+### 下一步
+Round 6 将聚焦模型下载与缓存策略：在 `.cache/models/` 下按后端与模型名存放权重，并补充下载进度条与断点续传能力。
+
 ## 后端架构与 Round 3 说明
 Round 3 引入统一接口 `ITranscriber`，所有后端在构造时接受 `model`、`language` 与任意扩展参数，并实现 `transcribe_file` 方法返
 回标准化的段级结构。`src/asr/backends/__init__.py` 维护了名称到实现的注册表，并提供 `create_transcriber` 工厂函数，未来新增的
