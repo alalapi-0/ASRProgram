@@ -156,6 +156,73 @@ OK: 核心依赖已就绪。
 ### 下一步
 Round 6 将聚焦模型下载与缓存策略：在 `.cache/models/` 下按后端与模型名存放权重，并补充下载进度条与断点续传能力。
 
+## Round 6：模型下载与缓存目录
+在本轮中，ASRProgram 首次引入“模型真实下载”能力：我们提供跨平台的 Python 下载器，并在安装脚本中默认触发模型拉取。所有模型都会缓存在用户主目录（如 `~/.cache/asrprogram/models/`）或自定义缓存目录中，仓库内依旧不包含任何权重文件，从而避免 Git 体积膨胀并尊重相关许可。
+
+### 为什么把模型放在缓存目录？
+- **许可与合规**：大部分 ASR 模型遵循特殊许可协议，不宜直接随仓库分发。
+- **体积与更新**：`faster-whisper` 的模型普遍超过数百 MB，放在用户缓存目录可以按需更新、也便于清理。
+- **多后端兼容**：未来接入 `whisper.cpp` 时，可在同一目录树下按后端划分子目录，减少路径配置成本。
+
+### 配置与参数
+安装脚本会默认读取 `config/default.yaml` 中的模型与缓存配置，以下参数可按需覆盖：
+
+| 参数 | 适用脚本 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `--backend` / `-backend` | `download_model.py` / `setup.sh` / `setup.ps1` | `faster-whisper` | 指定模型后端，目前支持 faster-whisper |
+| `--model` / `-model` | 同上 | `medium` | 选择模型规格，可选 `tiny` / `base` / `small` / `medium` / `large-v3` |
+| `--models-dir` / `-models-dir` | 同上 | `~/.cache/asrprogram/models/` | 模型缓存主目录，目录结构会自动按后端与模型名划分 |
+| `--cache-dir` / `-cache-dir` | 同上 | `.cache/` | 通用临时缓存目录，下载器会在其中创建 `tmp/` 以存放临时文件 |
+| `--mirror` | `download_model.py` | *按配置遍历* | 指定单个镜像源（如 `https://hf-mirror.com`） |
+| `--force` | `download_model.py` | `false` | 强制重新下载并覆盖已有模型 |
+
+### 典型命令
+```bash
+# 仅下载模型（不会创建虚拟环境）
+python scripts/download_model.py --backend faster-whisper --model medium --models-dir ~/.cache/asrprogram/models
+
+# 一键安装并自动下载模型
+bash scripts/setup.sh --check-only false --use-system-ffmpeg true --cache-dir .cache
+
+# PowerShell 版本
+pwsh -File scripts/setup.ps1 -check-only false -use-system-ffmpeg true -cache-dir .cache
+```
+
+下载器会按配置顺序尝试多个镜像，默认使用 Hugging Face 主站与备用镜像。下载过程中会显示每个文件的进度与重试次数，完成后输出 JSON：
+
+```json
+{"backend": "faster-whisper", "model": "medium", "path": "/home/user/.cache/asrprogram/models/faster-whisper/medium", "size_bytes": 1536496123}
+```
+
+### 模型体积参考
+以下数值来自官方仓库，仅供估算磁盘占用：
+
+| 模型 | 预估大小 | 说明 |
+| --- | ---: | --- |
+| tiny | ~ 75MB | 适合快速测试 |
+| base | ~ 140MB | 更平衡的体积与准确率 |
+| small | ~ 460MB | 折中方案 |
+| medium | ~ 1.5GB | 推荐规格，准确率更高 |
+| large-v3 | ~ 3GB+ | 最高准确率，资源占用大 |
+
+### verify_env.py 的输出变化
+`scripts/verify_env.py` 现已支持解析模型目录并判断模型是否就绪：
+
+- `MODEL STATUS: READY`：目录存在、关键文件齐全且总体积达到预估值。
+- `MODEL STATUS: MISSING/INCOMPLETE`：缺少文件或体积明显不足，会提示缺失列表与补救命令。
+- 当后端未知或后续轮次新增时，会打印 `WARNING` 并提示当前脚本尚未覆盖该后端的校验逻辑。
+
+### 常见问题排查
+- **网络超时或下载失败**：
+  - 使用 `--mirror https://hf-mirror.com` 或企业内部镜像源。
+  - 配置代理后重试，或手动下载模型文件后放到目标目录。
+- **磁盘空间不足**：检查 `models_dir` 所在分区是否留有足够空间，必要时切换到外部磁盘。
+- **权限问题**：Windows 用户若路径包含空格/中文，建议将模型目录改到 `C:\asr-cache\models` 等简单路径；Linux/macOS 请确认目录对当前用户可写。
+- **断点续传**：下载器默认会重试失败的请求并在 `.cache/tmp/` 中保留临时文件；若多次失败，可删除临时文件后重新执行。
+
+### 下一步
+Round 7/8 将让 faster-whisper 产生真实的转写结果，并在 JSON 输出中填充词级时间戳；Round 10 会补充 whisper.cpp 的 GGML/GGUF 模型下载与哈希校验。
+
 ## 后端架构与 Round 3 说明
 Round 3 引入统一接口 `ITranscriber`，所有后端在构造时接受 `model`、`language` 与任意扩展参数，并实现 `transcribe_file` 方法返
 回标准化的段级结构。`src/asr/backends/__init__.py` 维护了名称到实现的注册表，并提供 `create_transcriber` 工厂函数，未来新增的
