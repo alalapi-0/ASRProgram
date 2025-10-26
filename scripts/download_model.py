@@ -8,7 +8,8 @@ import sys
 from pathlib import Path
 from typing import Dict, Optional
 
-from huggingface_hub import HfHubHTTPError, snapshot_download
+from huggingface_hub import snapshot_download
+from huggingface_hub.errors import HfHubHTTPError
 
 
 ModelConfig = Dict[str, object]
