@@ -81,8 +81,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--verbose",
         type=parse_bool,
+        nargs="?",
+        const=True,
         default=None,
-        help="输出详细日志 (true/false)",
+        help="输出详细日志 (可省略值以启用 true/false)",
     )
     parser.add_argument(
         "--log-format",
