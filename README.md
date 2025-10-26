@@ -884,3 +884,36 @@ python -m src.cli.main \
 * **残留 `.tmp/.partial` 文件**：确认 `--cleanup-temp true` 已开启，或手动删除输出目录中的临时文件后再运行。
 * **Manifest 体积过大**：可定期将 `out/_manifest.jsonl` 归档至其它位置，并按日期切分；读取历史记录时利用 `load_index` 或按需 grep 指定日期。
 
+
+## Round 14：测试与校验
+本轮聚焦“可验证、可回归”的基础设施，引入 words/segments JSON Schema、完善测试体系，并提供轻量级 CI 工作流。
+
+### Schema 校验
+* `schemas/words.schema.json` 与 `schemas/segments.schema.json` 采用 JSON Schema 2020-12 草案，约束字段类型、必填项以及置信度/时间戳范围。
+* 顶层 `schema` 字段分别固定为 `asrprogram.wordset.v1` 与 `asrprogram.segmentset.v1`，便于后续版本演进时明确兼容窗口。
+* `src/utils/schema.py` 提供 `validate_words`/`validate_segments` 工具函数，会先执行 JSON Schema 校验，再补充检查 `end >= start` 等跨字段约束，并返回 `jsonschema.ValidationError` 以便测试捕获。
+
+### 本地测试与冒烟
+1. 安装开发测试依赖：
+   ```bash
+   pip install -r requirements-dev.txt
+   ```
+2. 运行单元/集成测试（默认跳过未来的 `@pytest.mark.slow`）：
+   ```bash
+   pytest -q
+   ```
+3. 执行一键冒烟（Bash 示例，PowerShell 亦提供 `scripts/smoke_test.ps1`）：
+   ```bash
+   bash scripts/smoke_test.sh
+   ```
+   脚本会创建临时目录、生成空白音频文件、调用 dummy 后端，并使用 `src.utils.schema` 对产物逐一校验，成功后打印 `OK` 提示。
+
+### Schema 版本与兼容性策略
+* `v1` 版本聚焦结构约束，允许在 `meta`、`backend` 等对象内追加新字段，同时保持 `additionalProperties: false` 对核心字段的约束。
+* 未来若引入破坏性调整（如词条字段重命名），将递增 schema 名称（例如 `asrprogram.wordset.v2`），并在工具层实现向后兼容或迁移脚本。
+* 测试覆盖了典型非法数据（负时间戳、`end < start`、缺字段），确保 schema 演进时不会回归。
+
+### 轻量 CI 策略
+* `.github/workflows/ci.yml` 仅执行 `pip install -r requirements-dev.txt` 与 `pytest -q --maxfail=1`，不触发模型下载或真实推理，保证云端运行速度。
+* 需要真实后端/模型的测试请标记为 `@pytest.mark.slow`，默认不在 CI 中执行，可在自管 Runner 或本地按需运行。
+* 冒烟脚本适合在发布前或部署后快速验收，结合 schema 校验确保 JSON 契约未被破坏。
