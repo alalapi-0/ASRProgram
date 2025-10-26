@@ -63,8 +63,8 @@ def run(cmd, env=None):
     print("\n$ " + " ".join(cmd))  # 在执行前打印命令，方便用户查看
     return subprocess.call(cmd, env=env)  # 调用外部命令并返回退出码
 
-def download_model(models_dir: str):
-    """调用项目自带的下载器脚本，下载 large-v2 模型到指定目录。"""
+def download_model(models_dir: str) -> str:
+    """调用项目自带的下载器脚本，下载 large-v2 模型并返回本地目录。"""
     downloader = REPO_ROOT / "scripts" / "download_model.py"  # 构造下载脚本的路径
     if not downloader.exists():  # 检查下载脚本是否存在
         print("缺少 scripts/download_model.py，无法自动下载模型。请先补齐脚本。")  # 给出错误提示
@@ -96,6 +96,8 @@ def download_model(models_dir: str):
         sys.exit(rc)  # 以原退出码终止程序
     else:
         print("✅ 模型已就绪，后续转写会直接复用缓存文件。")
+    target_dir = Path(models_dir) / FIXED_BACKEND / FIXED_MODEL  # 计算模型缓存目录
+    return str(target_dir.resolve())  # 返回规范化后的模型目录，供主程序复用
 
 def main():
     print("=== ASR QuickStart（中文词级转写｜固定 large-v2）===")  # 在启动时输出标题
@@ -118,7 +120,7 @@ def main():
 
     # 3) 下载模型（若未下载过）
     print("\n>>> 检查/下载模型：", FIXED_MODEL)  # 提示用户即将检查并下载模型
-    download_model(models_dir)  # 调用下载函数
+    model_path = download_model(models_dir)  # 调用下载函数并获取本地模型路径
 
     # 4) 开始转写（中文、段级+词级）
     print("\n>>> 开始转写（中文，large-v2） ...")  # 提示即将开始转写
@@ -136,10 +138,12 @@ def main():
         #   CPU:  --device cpu --compute-type int8 或 int8_float16
         #   CUDA: --device cuda --compute-type float16
     ]
+    cmd.extend(["--set", f"runtime.model={model_path}"])  # 指定使用已下载的本地模型，避免重复拉取
 
     # 通过环境变量把模型目录传给主程序（若主程序支持读取）
     env = os.environ.copy()  # 复制当前环境变量
     env["ASRPROGRAM_MODELS_DIR"] = models_dir  # 注入模型目录变量，供 CLI 使用
+    env.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")  # Windows 下禁用 Hugging Face 的符号链接警告
 
     rc = run(cmd, env=env)  # 执行转写命令
 
