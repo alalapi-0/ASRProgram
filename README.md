@@ -21,15 +21,44 @@ ASRProgram delivers an end-to-end pipeline that converts audio inputs into word-
 
 <!-- Purpose: Outline quickstart section -->
 ## 🚀 快速开始 / Quick Start
+<!-- Purpose: Provide zero-to-one prerequisites for beginners -->
+### 0. 环境准备 / Prepare Your Environment
+<!-- Purpose: Detail prerequisites for novice users -->
+1. 安装 [Python 3.10+](https://www.python.org/downloads/)（Windows 用户安装时勾选 “Add Python to PATH”）。
+2. （可选）安装 [Git](https://git-scm.com/downloads) 以便拉取更新。
+3. 在终端/命令提示符中克隆或解压本项目：
+   ```bash
+   git clone https://github.com/your-org/ASRProgram.git
+   cd ASRProgram
+   ```
+4. 建议创建虚拟环境，避免与系统 Python 冲突：
+   ```bash
+   python -m venv .venv
+   # Windows PowerShell
+   .venv\Scripts\activate
+   # macOS / Linux
+   source .venv/bin/activate
+   ```
+
 <!-- Purpose: Guide installation step heading -->
 ### 1. 安装依赖 / Install Dependencies
 <!-- Purpose: Provide commands for dependency installation -->
 ```bash
+pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
+<!-- Purpose: Document environment verification command for easy diagnosis -->
+### 2. 环境检测 / Verify the Setup
+<!-- Purpose: Explain usage of verify_env script -->
+运行自检脚本，自动检查 Python 版本、依赖、模型缓存目录以及 faster-whisper / whisper.cpp 相关配置：
+```bash
+python scripts/verify_env.py --backend faster-whisper --model base
+```
+> 若脚本输出 `WARNING`，请根据提示安装缺失依赖或调整目录权限。完整参数说明可通过 `-h/--help` 查看。
+
 <!-- Purpose: Provide run instructions heading -->
-### 2. 运行示例 / Run a Transcription Job
+### 3. 运行示例 / Run a Transcription Job
 <!-- Purpose: Provide CLI usage example with bilingual inline comments -->
 ```bash
 python -m src.cli.main \
@@ -41,14 +70,14 @@ python -m src.cli.main \
 ```
 
 <!-- Purpose: Highlight expected outputs heading -->
-### 3. 输出结果 / Output Artifacts
+### 4. 输出结果 / Output Artifacts
 <!-- Purpose: Detail output files for user awareness -->
 - <!-- Purpose: Word JSON explanation -->`out/*.words.json`：词级时间戳及置信度。
 - <!-- Purpose: Segment JSON explanation -->`out/*.segments.json`：段级转写（可选）。
 - <!-- Purpose: Manifest explanation -->`out/_manifest.jsonl`：处理记录、哈希与性能信息。
 
 <!-- Purpose: Provide python API sample heading -->
-### 4. Python API 示例 / Python API Usage
+### 5. Python API 示例 / Python API Usage
 <!-- Purpose: Show how to use library programmatically -->
 ```python
 from src.pipeline.runner import TranscriptionRunner  # 加载核心流水线
@@ -59,7 +88,7 @@ print(result.words[0])  # 打印首个词条的时间戳与置信度
 ```
 
 <!-- Purpose: Provide cloud invocation example heading -->
-### 5. 云端调用示例 / Cloud Invocation Example
+### 6. 云端调用示例 / Cloud Invocation Example
 <!-- Purpose: Show example for remote execution -->
 ```bash
 curl -X POST https://example.com/asrprogram/api/transcribe \
