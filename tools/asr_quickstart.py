@@ -4,7 +4,7 @@ ASR QuickStart（固定大模型，中文转写）
 -----------------------------------
 - 固定后端：faster-whisper
 - 固定语言：zh（中文）
-- 固定模型：large-v3（不再提供 tiny/small 等选项）
+- 固定模型：large-v2（不再提供 tiny/small 等选项）
 - 只让用户输入：输入路径（文件或文件夹）和输出目录
 - 自动下载模型（scripts/download_model.py）
 - Windows / Linux(Ubuntu) 通用
@@ -24,7 +24,7 @@ DEFAULT_INPUT_DIR = str((REPO_ROOT / "audio").resolve())  # 给出默认输入�
 DEFAULT_OUTPUT_DIR = str((REPO_ROOT / "out").resolve())  # 给出默认输出目录，集中保存结果
 
 # 固定使用大模型
-FIXED_MODEL = "large-v3"  # 固定模型名称为 large-v3，满足需求
+FIXED_MODEL = "large-v2"  # 固定模型名称为 large-v2，满足需求
 # 固定后端
 FIXED_BACKEND = "faster-whisper"  # 固定后端为 faster-whisper，避免其它选项
 
@@ -64,7 +64,7 @@ def run(cmd, env=None):
     return subprocess.call(cmd, env=env)  # 调用外部命令并返回退出码
 
 def download_model(models_dir: str):
-    """调用项目自带的下载器脚本，下载 large-v3 模型到指定目录。"""
+    """调用项目自带的下载器脚本，下载 large-v2 模型到指定目录。"""
     downloader = REPO_ROOT / "scripts" / "download_model.py"  # 构造下载脚本的路径
     if not downloader.exists():  # 检查下载脚本是否存在
         print("缺少 scripts/download_model.py，无法自动下载模型。请先补齐脚本。")  # 给出错误提示
@@ -79,7 +79,7 @@ def download_model(models_dir: str):
     cmd = [
         sys.executable, str(downloader),  # 使用当前解释器执行下载脚本
         "--backend", FIXED_BACKEND,  # 指定后端为 faster-whisper
-        "--model", FIXED_MODEL,  # 指定模型为 large-v3
+        "--model", FIXED_MODEL,  # 指定模型为 large-v2
         "--models-dir", models_dir  # 指定模型缓存目录
     ]
     if token:
@@ -95,7 +95,7 @@ def download_model(models_dir: str):
         sys.exit(rc)  # 以原退出码终止程序
 
 def main():
-    print("=== ASR QuickStart（中文词级转写｜固定 large-v3）===")  # 在启动时输出标题
+    print("=== ASR QuickStart（中文词级转写｜固定 large-v2）===")  # 在启动时输出标题
 
     # 简单环境检查：ffmpeg/ffprobe 是否可用（缺失也允许继续）
     if not which("ffmpeg") or not which("ffprobe"):  # 检查 ffmpeg 和 ffprobe 是否都在 PATH 中
@@ -118,7 +118,7 @@ def main():
     download_model(models_dir)  # 调用下载函数
 
     # 4) 开始转写（中文、段级+词级）
-    print("\n>>> 开始转写（中文，large-v3） ...")  # 提示即将开始转写
+    print("\n>>> 开始转写（中文，large-v2） ...")  # 提示即将开始转写
     cmd = [
         sys.executable, "-m", "src.cli.main",  # 使用模块方式调用 CLI 主入口
         "--input", in_path,  # 设置输入路径
