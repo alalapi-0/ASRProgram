@@ -398,6 +398,64 @@ Round 7/8 将让 faster-whisper 产生真实的转写结果，并在 JSON 输出
 - `<name>.segments.json` 的 `segments[*].words` 字段与词级结果同步，便于对照段落与词汇。
 - 为中文、日文等无空格语言提供降级切分：当后端缺失词级信息时，会按照字符/长度比例划分段内时间。
 - 对置信度字段执行兜底：优先使用词级概率，其次回退到段级平均值，最后置为 `null`。
+
+## Round 13：配置分层、Profile 与配置快照
+本轮聚焦“可维护、可审计、可覆写”的配置体系：引入分层合并、Profile 预设、环境变量覆盖与配置快照导出机制，方便在不同环境间快速切换。
+
+### 分层与优先级
+```
+default.yaml  <  user.yaml  <  .env / ASRPROGRAM_*  <  CLI / --set
+(最低)                                           (最高)
+```
+配置加载顺序固定：始终以仓库内置的 `config/default.yaml` 为基线，随后按顺序应用用户配置、`.env`/`ASRPROGRAM_*` 环境变量，最后由 CLI 显式参数与 `--set` 键值覆盖。深度合并策略确保仅修改必要字段，`None` 不会覆盖已有非空值，而空字符串被视为显式覆盖。
+
+### Profile 预设示例
+`default.yaml` 新增了 `cpu-fast`、`gpu-accurate`、`whispercpp-lite` 与 `balanced` 等预设，可通过 `--profile` 一键切换多项参数：
+
+```bash
+# 使用 GPU 高精度预设，再局部覆盖 compute_type
+python -m src.cli.main --profile gpu-accurate --set runtime.compute_type=float16 --input ./samples
+```
+
+Profile 应用后仍可继续叠加环境变量、CLI 参数或 `--set`，最终生效的 profile 名称会写入 `config.meta.profile`，并在日志与摘要中输出。
+
+### 环境变量与 .env
+配置加载器会自动解析仓库根目录与用户配置目录下的 `.env` 文件，仅当键以 `ASRPROGRAM_` 开头时生效，双下划线 `__` 表示层级。例如：
+
+```bash
+export ASRPROGRAM_RUNTIME__DEVICE=cuda
+export ASRPROGRAM_CACHE_DIR=/mnt/fast-cache
+```
+
+脚本运行时也会读取进程环境中的同名前缀变量，布尔与数字会自动转成合适的类型。
+
+### 配置快照：--print-config / --save-config
+新增的 CLI 选项可导出最终生效配置（附带来源注释），便于复现实验或上传到调度器：
+
+```bash
+# 打印最终配置并退出
+python -m src.cli.main --input ./samples --profile balanced --print-config true
+
+# 保存快照到指定文件（不会执行转写）
+python -m src.cli.main --input ./samples --profile cpu-fast --save-config ./runs/cpu-fast.yaml
+```
+
+快照由 `src/utils/config.render_effective_config` 生成，可在 YAML 注释中看到每个字段的来源链路（默认配置/用户配置/环境/CLI）。
+
+### 校验规则速览
+新的轻量 schema 对关键字段做了严格检查：
+
+- `runtime.backend` 仅允许 `faster-whisper` / `whisper.cpp` / `dummy`。
+- `runtime.beam_size >= 1`，`runtime.temperature` 范围为 `[0, 1]`。
+- `num_workers >= 1`、`max_retries >= 0`、`log_sample_rate` 位于 `(0, 1]`。
+- 路径字段会自动展开 `~`、清理尾部斜杠，语言/后端/设备等字符串统一小写。
+
+当配置非法时会抛出 `ConfigError` 并附带来源提示，例如 `Invalid value for runtime.beam_size ... source=user:config/user.yaml`，便于快速定位问题。
+
+### 最佳实践
+- **本地开发**：在 `config/user.yaml` 中记录个人默认值，配合少量 `--set` 进行临时覆盖。
+- **云端跑批**：固定一个 profile，并使用 `--save-config` 导出的快照提交给调度系统，确保跨机器运行一致。
+- **环境检查**：`scripts/verify_env.py` 会展示当前生效的 profile、缓存/模型路径以及 whisper.cpp 可执行路径，帮助排查环境差异。
 - 所有时间戳经过单调性修正，确保 `start <= end` 且跨词递增；修正次数会写入 `meta.postprocess.word_monotonicity_fixes`。
 
 ### 运行命令

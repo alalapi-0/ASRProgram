@@ -9,6 +9,7 @@ from pathlib import Path  # 优雅地处理路径。
 from typing import Dict, Iterable, List, Optional, Tuple  # 提供类型注解。
 
 import yaml  # 读取默认配置文件。
+from src.utils.config import load_and_merge_config  # 导入配置加载器以输出 profile 与路径概览。
 
 REQUIRED_PACKAGES = [  # 定义必须存在的 Python 包。
     ("faster_whisper", "faster-whisper"),  # faster-whisper 是核心依赖。
@@ -64,12 +65,14 @@ def build_parser(defaults: Dict[str, object]) -> argparse.ArgumentParser:
     cache_default = defaults.get("cache_dir", ".cache/")  # 读取缓存目录默认值。
     models_default = defaults.get("models_dir", "~/.cache/asrprogram/models/")  # 读取模型目录默认值。
     whisper_defaults = defaults.get("runtime", {}).get("whisper_cpp", {})  # 读取 whisper.cpp 默认配置。
+    profile_default = defaults.get("meta", {}).get("profile")  # 读取默认 profile，用于配置概览。
     parser.add_argument("--backend", default=backend_default, help="目标模型后端。")  # 后端参数。
     parser.add_argument("--model", default=model_default, help="目标模型规格。")  # 模型参数。
     parser.add_argument("--models-dir", default=models_default, help="模型缓存主目录。")  # 模型目录参数。
     parser.add_argument("--cache-dir", default=cache_default, help="通用缓存目录。")  # 缓存目录参数。
     parser.add_argument("--whispercpp-exe", default=whisper_defaults.get("executable_path", ""), help="whisper.cpp 可执行文件路径。")  # 可执行参数。
     parser.add_argument("--whispercpp-model", default=whisper_defaults.get("model_path", ""), help="whisper.cpp GGML/GGUF 模型路径。")  # 模型路径参数。
+    parser.add_argument("--profile", default=profile_default, help="可选 profile 名称，用于演示配置覆盖效果。")  # 新增 profile 参数。
     return parser  # 返回解析器。
 
 
@@ -304,6 +307,42 @@ def main() -> None:
     args = parser.parse_args()  # 解析命令行参数。
     models_dir = Path(args.models_dir).expanduser().resolve()  # 解析模型目录。
     cache_dir = Path(args.cache_dir).expanduser().resolve()  # 解析缓存目录。
+    cli_overrides: Dict[str, object] = {  # 构造传入配置加载器的覆盖层。
+        "models_dir": str(models_dir),  # 将模型目录写入配置树。
+        "cache_dir": str(cache_dir),  # 将缓存目录写入配置树。
+    }
+    runtime_overrides: Dict[str, object] = {}  # 初始化运行时覆盖字典。
+    if args.backend:  # 若提供后端参数。
+        runtime_overrides["backend"] = args.backend  # 将后端写入 runtime。
+    whisper_overrides: Dict[str, object] = {}  # 构造 whisper.cpp 子配置覆盖。
+    if args.whispercpp_exe:  # 若提供可执行路径。
+        whisper_overrides["executable_path"] = args.whispercpp_exe  # 写入可执行路径。
+    if args.whispercpp_model:  # 若提供模型路径。
+        whisper_overrides["model_path"] = args.whispercpp_model  # 写入模型路径。
+    if whisper_overrides:  # 当存在 whisper.cpp 覆盖时。
+        runtime_overrides["whisper_cpp"] = whisper_overrides  # 嵌入到 runtime。
+    if runtime_overrides:  # 若 runtime 覆盖非空。
+        cli_overrides["runtime"] = runtime_overrides  # 写入顶层覆盖。
+    try:  # 尝试加载并合并配置。
+        bundle = load_and_merge_config(
+            cli_overrides=cli_overrides,  # 注入 CLI 覆盖。
+            profile_name=args.profile,  # 应用用户选择的 profile。
+        )
+    except Exception as exc:  # noqa: BLE001  # 捕获配置加载期间的任何异常。
+        bundle = None  # 若失败则置空。
+        print_section("配置快照")  # 提示配置概览章节。
+        print(f"WARNING: 无法解析配置 -> {exc}")  # 输出错误信息。
+    else:  # 配置加载成功。
+        print_section("配置快照")  # 打印配置概览标题。
+        runtime_cfg = bundle.config.get("runtime", {}) if isinstance(bundle.config, dict) else {}  # 读取运行时配置。
+        whisper_cfg = runtime_cfg.get("whisper_cpp", {}) if isinstance(runtime_cfg, dict) else {}  # 读取 whisper.cpp 子树。
+        print_kv("PROFILE", bundle.profile or "<default>")  # 输出当前 profile。
+        print_kv("BACKEND", runtime_cfg.get("backend", "unknown"))  # 输出运行时后端。
+        print_kv("DEVICE", runtime_cfg.get("device", "auto"))  # 输出设备信息。
+        print_kv("CACHE DIR", bundle.config.get("cache_dir", ""))  # 输出缓存目录。
+        print_kv("MODELS DIR", bundle.config.get("models_dir", ""))  # 输出模型目录。
+        print_kv("WHISPER.EXE", whisper_cfg.get("executable_path", ""))  # 输出 whisper.cpp 可执行路径。
+        print_kv("WHISPER.MODEL", whisper_cfg.get("model_path", ""))  # 输出 whisper.cpp 模型路径。
     print("ASRProgram 环境体检报告（Round 10）")  # 打印标题。
     print_kv("Python 解释器", sys.executable)  # 输出解释器路径。
     print_kv("Python 版本", platform.python_version())  # 输出 Python 版本。

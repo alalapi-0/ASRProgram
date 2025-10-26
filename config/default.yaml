@@ -1,45 +1,93 @@
-# 默认配置文件，展示 CLI 参数的典型取值。  # 对整个文件的说明。
-input: ./samples  # 输入音频目录默认指向 samples。
-out_dir: ./out  # 转写输出目录默认位于仓库内的 out。
-backend_cli_default: dummy  # CLI 层的默认后端保持 dummy 以兼容早期轮次。
-language: auto  # 默认自动检测语言。
-segments_json: true  # 默认导出段级 JSON。
-overwrite: false  # 默认不覆盖已有结果。
-num_workers: 1  # 默认使用单线程处理。
-dry_run: false  # 默认真实落盘。
-verbose: false  # 默认关闭详细日志。
-runtime:  # 新增运行时默认设置集合。
-  backend: faster-whisper  # 推荐的真实后端。
-  language: auto  # 转写语言默认自动检测，可被 CLI 覆盖。
+# 默认配置文件，定义基础行为并注释各字段含义。  # 文件级说明。
+meta:  # 元信息区，运行时会写入 profile 与快照时间。
+  profile: null  # 预留字段，load_and_merge_config 会填入实际 profile 名称。
+  config_generated_at: null  # 运行时生成的 ISO8601 时间戳，便于追踪。
+input: ./samples  # 默认输入音频目录，指向仓库内 samples。
+out_dir: ./out  # 默认输出目录，集中存放转写结果。
+backend_cli_default: dummy  # CLI 层历史兼容字段，保持 dummy。
+language: auto  # 顶层语言占位，保留向后兼容。
+segments_json: true  # 顶层段级 JSON 开关，占位以兼容旧版本。
+overwrite: false  # 顶层覆盖开关，真实逻辑在 runtime 内。
+num_workers: 1  # 默认并发 worker 数。
+dry_run: false  # 默认执行真实写入而非 dry-run。
+verbose: false  # 默认关闭 verbose 日志。
+log_format: human  # 日志格式可选 human/jsonl。
+log_level: INFO  # 默认日志级别。
+log_file: ""  # 若填写则输出日志到指定路径。
+log_sample_rate: 1.0  # 信息级日志采样率。
+metrics_file: ""  # 若非空则导出运行指标。
+profiling:  # 配置轻量级性能分析器。
+  enabled: false  # 是否开启 PhaseTimer 统计。
+quiet: false  # 是否静默控制台输出。
+progress: true  # 是否展示进度条。
+max_retries: 1  # 单文件最大重试次数。
+rate_limit: 0.0  # 提交任务的速率限制，0 表示不限。
+skip_done: true  # 是否跳过已有结果的文件。
+fail_fast: false  # 是否遇到失败立即停止。
+integrity_check: true  # 是否计算并校验 SHA-256。
+lock_timeout: 30.0  # 文件锁超时时长（秒）。
+cleanup_temp: true  # 是否清理残留临时文件。
+manifest_path: ""  # 若留空则自动写入 out_dir/_manifest.jsonl。
+force: false  # 是否无视缓存强制重跑。
+runtime:  # 运行时核心配置，供后端实例化使用。
+  backend: faster-whisper  # 默认后端，支持 faster-whisper/whisper.cpp/dummy。
+  language: auto  # 自动检测语言，可被覆盖。
   segments_json: true  # 是否输出段级 JSON。
   overwrite: false  # 是否覆盖已有结果。
-  compute_type: auto  # faster-whisper compute_type，可设 int8/int8_float16/float16/float32。
-  device: auto  # 设备选择，auto 会在 GPU 可用时自动切换。
-  beam_size: 5  # 默认 beam search 宽度，1 可换取更快速度。
-  temperature: 0.0  # 默认温度，0 表示贪心/beam 搜索。
-  vad_filter: false  # 是否启用 VAD 过滤，Round 7 仅记录。
-  chunk_length_s: null  # 可选切块长度（秒），null 使用库默认值。
-  best_of: null  # 采样模式下的候选数，beam search 时忽略。
-  patience: null  # beam search 提前停止阈值，可保持 null。
-  whisper_cpp:  # whisper.cpp 后端的运行默认值。
-    executable_path: ""  # 可执行文件路径，安装脚本会尝试写入或提示用户手动填写。
-    model_path: ""  # GGML/GGUF 模型文件路径，建议存放在 models/whisper.cpp/ 下。
-    threads: 0  # 线程数，0 表示由 whisper.cpp 自动根据硬件选择。
-    beam_size: 5  # beam search 宽度，与 faster-whisper 保持一致。
-    temperature: 0.0  # 温度参数，0 表示贪心策略。
-    max_len: null  # 输出最大 token 数，null 表示使用默认。
-    prompt: null  # 初始提示词，可在 CLI 中覆盖。
-    print_progress: false  # 是否打印进度条，默认关闭以减少日志噪音。
-    timeout_sec: null  # 子进程调用超时时间，null 表示不设置超时。
-backend:  # 后端下载相关默认值聚合于此字典。
-  default: faster-whisper  # 推荐的真实后端为 faster-whisper。
-model:  # 模型配置相关键集合。
-  default: medium  # 默认下载 medium 规格，可选 tiny|base|small|medium|large-v3。
-cache_dir: .cache/  # 仓库内缓存目录默认指向 .cache/，可被脚本覆盖。
-models_dir: ~/.cache/asrprogram/models/  # 默认将模型缓存在用户目录下的专用路径。
-download:  # 下载相关默认参数集合。
-  mirrors:  # 下载镜像列表，脚本会按顺序依次尝试。
-    - https://huggingface.co  # 官方主仓库，提供最新模型文件。
-    - https://hf-mirror.com  # 备用镜像，适合部分地区加速访问。
-  timeout_sec: 60  # 单次网络请求的默认超时时长（秒）。
-  retries: 3  # 每个文件的最大重试次数。
+  compute_type: auto  # 推理精度，可设 int8/int8_float16/float16/float32。
+  device: auto  # 运行设备，auto 将优先选择可用 GPU。
+  beam_size: 5  # beam search 宽度，1 可换取更高速度。
+  temperature: 0.0  # 采样温度，建议 0~1。
+  vad_filter: false  # 是否启用 VAD 过滤。
+  chunk_length_s: null  # 可选分段长度，null 表示使用库默认。
+  best_of: null  # 采样模式候选数，beam search 时忽略。
+  patience: null  # beam search 提前停止阈值。
+  whisper_cpp:  # whisper.cpp 专属参数。
+    executable_path: ""  # whisper.cpp 可执行文件路径。
+    model_path: ""  # GGML/GGUF 模型路径。
+    threads: 0  # 线程数，0 表示自动。
+    beam_size: 5  # whisper.cpp 下的 beam 宽度。
+    temperature: 0.0  # whisper.cpp 温度参数。
+    max_len: null  # 最大输出 token 数。
+    prompt: null  # 初始提示词，可选。
+    print_progress: false  # 是否输出内部进度。
+    timeout_sec: null  # 子进程超时时长。
+backend:  # 后端下载相关默认值集合。
+  default: faster-whisper  # 推荐的真实后端。
+model:  # 模型相关默认设置。
+  default: medium  # 默认模型规格，可根据硬件调整。
+cache_dir: .cache/  # 仓库内缓存目录。
+models_dir: ~/.cache/asrprogram/models/  # 用户级模型缓存目录。
+download:  # 下载通用配置。
+  mirrors:  # 模型下载镜像列表。
+    - https://huggingface.co  # 官方主站。
+    - https://hf-mirror.com  # 中国大陆友好镜像。
+  timeout_sec: 60  # 网络请求超时。
+  retries: 3  # 单文件最大重试次数。
+profiles:  # 预设 Profile 列表，可在 CLI 通过 --profile 选择。
+  cpu-fast:  # CPU 快速推理配置。
+    runtime:
+      backend: "faster-whisper"  # 使用 faster-whisper 后端。
+      device: "cpu"  # 固定在 CPU 上运行。
+      compute_type: "int8"  # 低精度以换取速度。
+      beam_size: 1  # 减小 beam 获得更高吞吐。
+  gpu-accurate:  # GPU 高精度配置。
+    runtime:
+      backend: "faster-whisper"  # 使用 faster-whisper。
+      device: "cuda"  # 固定使用 GPU。
+      compute_type: "float16"  # 半精度提升精度。
+      beam_size: 5  # 更大的 beam 获取更好结果。
+  whispercpp-lite:  # whisper.cpp 轻量配置。
+    runtime:
+      backend: "whisper.cpp"  # 切换到 whisper.cpp 实现。
+      segments_json: true  # 强制输出段级 JSON 便于调试。
+      whisper_cpp:
+        threads: 0  # 线程数保持自动。
+        beam_size: 3  # 减少 beam 提升速度。
+    # whisper.cpp profile 不强制 compute_type/device，让库自行决策。
+  balanced:  # 折中配置，适用于未知硬件。
+    runtime:
+      backend: "faster-whisper"  # 仍采用 faster-whisper。
+      device: "auto"  # 自动检测最优设备。
+      compute_type: "int8_float16"  # 混合精度权衡速度与质量。
+      beam_size: 3  # 适中 beam。

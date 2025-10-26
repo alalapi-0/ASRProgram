@@ -1,5 +1,6 @@
 """实现 Round 11 的并发批处理转写管线，强化锁与完整性校验。"""  # 模块说明。
 # 导入 errno 以识别常见 I/O 错误码并辅助错误分类。 
+import copy  # 导入 copy 以在配置模式下安全地复制字典。
 import errno
 # 导入 json 以读取已有 words.json 用于哈希比对。 
 import json
@@ -57,6 +58,7 @@ ALLOWED_EXTENSIONS = [".wav", ".mp3", ".m4a", ".flac"]
 # 定义词级与段级 JSON 的 schema 标识。 
 WORD_SCHEMA = "asrprogram.wordset.v1"
 SEGMENT_SCHEMA = "asrprogram.segmentset.v1"
+_UNSET = object()  # 配置哨兵，用于判断调用方是否显式传入覆盖值。
 # 定义修正逆序时间的微小阈值。 
 EPSILON = 1e-3
 
@@ -632,61 +634,222 @@ def _process_one(task: PipelineTask, context: TaskContext) -> TaskResult:
 
 # 定义主运行函数，协调扫描、并发执行与 Manifest。 
 def run(
-    input_path: str,
-    out_dir: str,
-    backend_name: str,
-    language: str = "auto",
-    segments_json: bool = True,
-    overwrite: bool = False,
-    dry_run: bool = False,
-    verbose: bool = False,
-    log_format: str = "human",
-    log_level: str = "INFO",
-    log_file: str | None = None,
-    log_sample_rate: float = 1.0,
-    quiet: bool = False,
-    metrics_file: str | None = None,
-    profile: bool = False,
-    progress: bool = True,
-    model: str | None = None,
-    compute_type: str = "auto",
-    device: str = "auto",
-    beam_size: int = 5,
-    temperature: float = 0.0,
-    vad_filter: bool = False,
-    chunk_length_s: float | None = None,
-    best_of: int | None = None,
-    patience: float | None = None,
-    num_workers: int = 1,
-    max_retries: int = 1,
-    rate_limit: float = 0.0,
-    skip_done: bool = True,
-    fail_fast: bool = False,
-    integrity_check: bool = True,
-    lock_timeout: float = 30.0,
-    cleanup_temp: bool = True,
-    manifest_path: str | None = None,
-    force: bool = False,
+    config: dict | None = None,
+    *,
+    input_path: str | None = None,
+    out_dir: str | None = None,
+    backend_name: str | None = None,
+    language: str | object = _UNSET,
+    segments_json: bool | object = _UNSET,
+    overwrite: bool | object = _UNSET,
+    dry_run: bool | object = _UNSET,
+    verbose: bool | object = _UNSET,
+    log_format: str | object = _UNSET,
+    log_level: str | object = _UNSET,
+    log_file: str | object = _UNSET,
+    log_sample_rate: float | object = _UNSET,
+    quiet: bool | object = _UNSET,
+    metrics_file: str | object = _UNSET,
+    profile: bool | object = _UNSET,
+    progress: bool | object = _UNSET,
+    model: str | object = _UNSET,
+    compute_type: str | object = _UNSET,
+    device: str | object = _UNSET,
+    beam_size: int | object = _UNSET,
+    temperature: float | object = _UNSET,
+    vad_filter: bool | object = _UNSET,
+    chunk_length_s: float | object = _UNSET,
+    best_of: int | object = _UNSET,
+    patience: float | object = _UNSET,
+    num_workers: int | object = _UNSET,
+    max_retries: int | object = _UNSET,
+    rate_limit: float | object = _UNSET,
+    skip_done: bool | object = _UNSET,
+    fail_fast: bool | object = _UNSET,
+    integrity_check: bool | object = _UNSET,
+    lock_timeout: float | object = _UNSET,
+    cleanup_temp: bool | object = _UNSET,
+    manifest_path: str | object = _UNSET,
+    force: bool | object = _UNSET,
     logger: StructuredLogger | None = None,
     **legacy_kwargs,
 ) -> dict:
     """执行批量音频转写并返回统计摘要。"""  # 函数说明。
-    if "write_segments" in legacy_kwargs:
+
+    if "write_segments" in legacy_kwargs:  # 兼容旧版参数名。
         segments_json = legacy_kwargs.pop("write_segments")
-    legacy_kwargs.pop("num_workers", None)
-    if legacy_kwargs:
+    legacy_kwargs.pop("num_workers", None)  # 兼容历史冗余参数。
+    if legacy_kwargs:  # 若仍有未知参数则直接提示。
         unsupported = ", ".join(sorted(legacy_kwargs.keys()))
         raise TypeError(f"Unsupported arguments for pipeline.run: {unsupported}")
+    cfg = copy.deepcopy(config) if config is not None else {}  # 拷贝配置避免外部引用受影响。
+    if not isinstance(cfg, dict):  # 基础类型检查，确保传入结构合法。
+        raise TypeError("config must be a dict when provided")
+    runtime_cfg = cfg.get("runtime")  # 读取运行时子树。
+    if not isinstance(runtime_cfg, dict):  # 若缺失则初始化。
+        runtime_cfg = {}
+    cfg["runtime"] = runtime_cfg  # 写回规范化后的 runtime。
+    profiling_cfg = cfg.get("profiling")  # 读取 profiling 配置。
+    if not isinstance(profiling_cfg, dict):  # 若缺失则初始化空字典。
+        profiling_cfg = {}
+    cfg["profiling"] = profiling_cfg  # 确保 profiling 键存在。
+    if input_path is not None:  # CLI 或调用方可直接覆盖输入路径。
+        cfg["input"] = input_path
+    if out_dir is not None:  # 同理允许覆盖输出目录。
+        cfg["out_dir"] = out_dir
+    top_overrides = {  # 收集顶层可能的覆盖值。
+        "dry_run": dry_run,
+        "verbose": verbose,
+        "log_format": log_format,
+        "log_level": log_level,
+        "log_file": log_file,
+        "log_sample_rate": log_sample_rate,
+        "quiet": quiet,
+        "metrics_file": metrics_file,
+        "progress": progress,
+        "num_workers": num_workers,
+        "max_retries": max_retries,
+        "rate_limit": rate_limit,
+        "skip_done": skip_done,
+        "fail_fast": fail_fast,
+        "integrity_check": integrity_check,
+        "lock_timeout": lock_timeout,
+        "cleanup_temp": cleanup_temp,
+        "manifest_path": manifest_path,
+        "force": force,
+    }
+    for key, value in top_overrides.items():  # 仅当调用方显式提供时才覆盖。
+        if value is not _UNSET:
+            cfg[key] = value
+    top_defaults = {  # 顶层默认值集合，用于填补缺省。
+        "dry_run": False,
+        "verbose": False,
+        "log_format": "human",
+        "log_level": "INFO",
+        "log_file": None,
+        "log_sample_rate": 1.0,
+        "quiet": False,
+        "metrics_file": None,
+        "progress": True,
+        "num_workers": 1,
+        "max_retries": 1,
+        "rate_limit": 0.0,
+        "skip_done": True,
+        "fail_fast": False,
+        "integrity_check": True,
+        "lock_timeout": 30.0,
+        "cleanup_temp": True,
+        "manifest_path": None,
+        "force": False,
+    }
+    for key, default_value in top_defaults.items():  # 逐项填充默认值。
+        if key not in cfg or cfg[key] is None:
+            cfg[key] = default_value
+    runtime_overrides = {  # 收集 runtime 层的显式覆盖。
+        "language": language,
+        "segments_json": segments_json,
+        "overwrite": overwrite,
+        "model": model,
+        "compute_type": compute_type,
+        "device": device,
+        "beam_size": beam_size,
+        "temperature": temperature,
+        "vad_filter": vad_filter,
+        "chunk_length_s": chunk_length_s,
+        "best_of": best_of,
+        "patience": patience,
+    }
+    for key, value in runtime_overrides.items():  # 同样只在显式提供时才覆盖。
+        if value is not _UNSET:
+            runtime_cfg[key] = value
+    if backend_name is not None:  # 后端名称优先使用显式参数。
+        runtime_cfg["backend"] = backend_name
+    if "backend" not in runtime_cfg or not runtime_cfg["backend"]:  # 后端为必填项。
+        raise ValueError("Runtime backend must be specified via config or parameters")
+    runtime_defaults = {  # runtime 层默认值集合。
+        "language": "auto",
+        "segments_json": True,
+        "overwrite": False,
+        "model": None,
+        "compute_type": "auto",
+        "device": "auto",
+        "beam_size": 5,
+        "temperature": 0.0,
+        "vad_filter": False,
+        "chunk_length_s": None,
+        "best_of": None,
+        "patience": None,
+    }
+    for key, default_value in runtime_defaults.items():  # 逐项补齐默认值。
+        if key not in runtime_cfg or runtime_cfg[key] is None:
+            runtime_cfg[key] = default_value
+    if profile is not _UNSET:  # 兼容旧版 profile 布尔开关。
+        profiling_cfg["enabled"] = profile
+    elif "enabled" not in profiling_cfg:  # 若配置未指定则默认关闭。
+        profiling_cfg["enabled"] = False
+    if "input" not in cfg or not cfg["input"]:  # 输入路径最终仍为必填。
+        raise ValueError("Input path must be provided via config or arguments")
+    if "out_dir" not in cfg or not cfg["out_dir"]:  # 输出目录同理。
+        raise ValueError("Output directory must be provided via config or arguments")
+    input_path = str(cfg["input"])  # 规范化输入路径为字符串。
+    out_dir = str(cfg["out_dir"])  # 规范化输出目录。
+    backend_name = runtime_cfg["backend"]  # 读取最终后端。
+    language = runtime_cfg.get("language")  # 读取语言参数。
+    segments_json = bool(runtime_cfg.get("segments_json"))  # 是否输出段级 JSON。
+    overwrite = bool(runtime_cfg.get("overwrite"))  # 是否覆盖已有文件。
+    model = runtime_cfg.get("model")  # 运行时模型参数。
+    compute_type = runtime_cfg.get("compute_type")  # 精度设置。
+    device = runtime_cfg.get("device")  # 设备选择。
+    beam_size = max(1, int(runtime_cfg.get("beam_size") or 1))  # beam 宽度至少为 1。
+    temperature_value = runtime_cfg.get("temperature")  # 温度原始值。
+    temperature = float(temperature_value if temperature_value is not None else 0.0)  # 归一化温度。
+    vad_filter = bool(runtime_cfg.get("vad_filter"))  # VAD 开关。
+    chunk_value = runtime_cfg.get("chunk_length_s")  # 分段长度。
+    chunk_length_s = float(chunk_value) if chunk_value is not None else None  # 归一化为浮点数。
+    best_of_value = runtime_cfg.get("best_of")  # 采样候选数。
+    best_of = int(best_of_value) if best_of_value is not None else None  # 转换为整数或 None。
+    patience_value = runtime_cfg.get("patience")  # 提前停止阈值。
+    patience = float(patience_value) if patience_value is not None else None  # 转换为浮点或 None。
+    dry_run = bool(cfg.get("dry_run"))  # 读取最终 dry-run 开关。
+    verbose = bool(cfg.get("verbose"))  # 读取 verbose 开关。
+    log_format = cfg.get("log_format") or "human"  # 日志格式默认 human。
+    log_level = cfg.get("log_level") or "INFO"  # 日志等级默认 INFO。
+    log_file = cfg.get("log_file") or None  # 日志文件可为空。
+    log_sample_rate_value = cfg.get("log_sample_rate")  # 采样率原始值。
+    log_sample_rate = float(log_sample_rate_value if log_sample_rate_value is not None else 1.0)  # 归一化采样率。
+    log_sample_rate = max(min(log_sample_rate, 1.0), 1e-6)  # 裁剪至合法区间。
+    quiet = bool(cfg.get("quiet"))  # 静默模式。
+    metrics_file = cfg.get("metrics_file") or None  # 指标导出路径。
+    progress = bool(cfg.get("progress"))  # 进度条开关。
+    num_workers_value = cfg.get("num_workers")  # 并发 worker 数。
+    num_workers = max(1, int(num_workers_value if num_workers_value is not None else 1))  # 至少为 1。
+    max_retries_value = cfg.get("max_retries")  # 最大重试次数。
+    max_retries = max(0, int(max_retries_value if max_retries_value is not None else 0))  # 不得为负。
+    rate_limit_value = cfg.get("rate_limit")  # 速率限制。
+    rate_limit = max(0.0, float(rate_limit_value if rate_limit_value is not None else 0.0))  # 不小于 0。
+    skip_done = bool(cfg.get("skip_done"))  # 跳过已完成文件。
+    fail_fast = bool(cfg.get("fail_fast"))  # 失败即停。
+    integrity_check = bool(cfg.get("integrity_check"))  # 完整性校验。
+    lock_timeout_value = cfg.get("lock_timeout")  # 锁超时原始值。
+    lock_timeout = max(0.0, float(lock_timeout_value if lock_timeout_value is not None else 0.0))  # 不小于 0。
+    cleanup_temp = bool(cfg.get("cleanup_temp"))  # 清理临时文件。
+    manifest_path_value = cfg.get("manifest_path")  # 清单路径。
+    manifest_path = str(manifest_path_value) if manifest_path_value else None  # 归一化为字符串或 None。
+    force = bool(cfg.get("force"))  # 强制重跑开关。
+    profiling_enabled = bool(profiling_cfg.get("enabled"))  # Profiling 开关最终值。
+    profile = profiling_enabled  # 重用原变量以兼容后续逻辑。
+    active_profile = cfg.get("meta", {}).get("profile")  # 记录生效的 profile 名称。
+    cfg["manifest_path"] = manifest_path  # 将推导后的 manifest 写回配置。
     effective_level = log_level.upper() if log_level else "INFO"  # 规范化日志等级。
-    if verbose and effective_level == "INFO":  # 兼容旧版 verbose 行为，在默认等级时提升为 DEBUG。
+    if verbose and effective_level == "INFO":  # 在 verbose 模式下自动提升等级。
         effective_level = "DEBUG"
-    base_logger = logger or get_logger(
+    base_logger = logger or get_logger(  # 创建或复用结构化日志器。
         format=log_format,
         level=effective_level,
         log_file=log_file,
         sample_rate=log_sample_rate,
         quiet=quiet,
-    )  # 创建或复用结构化日志器。
+    )
     trace_id = new_trace_id()  # 为本次运行生成 TraceID。
     run_logger = bind_context(base_logger, trace_id=trace_id)  # 绑定 TraceID 形成运行级日志器。
     if verbose:  # 在详细模式下输出配置摘要。
@@ -827,6 +990,14 @@ def run(
             "skipped_items": skipped_items,
             "skipped_stale": 0,
             "lock_conflicts": 0,
+            "config": {
+                "profile": active_profile,
+                "backend": backend_name,
+                "device": device,
+                "compute_type": compute_type,
+                "beam_size": beam_size,
+                "profiling_enabled": profile,
+            },
         }
         return _finalize(summary)
     if not tasks:
@@ -847,9 +1018,17 @@ def run(
             "skipped_items": skipped_items,
             "skipped_stale": 0,
             "lock_conflicts": 0,
+            "config": {
+                "profile": active_profile,
+                "backend": backend_name,
+                "device": device,
+                "compute_type": compute_type,
+                "beam_size": beam_size,
+                "profiling_enabled": profile,
+            },
         }
         return _finalize(summary)
-    progress_allowed = progress and not quiet  # 仅在允许进度且非静默时启用。
+    progress_allowed = progress and not quiet  # 仅在允许进度且静默时启用。
     if log_format.lower() == "jsonl" and quiet:
         progress_allowed = False  # 在 JSONL+静默模式下关闭进度动画以避免干扰。
     progress = ProgressPrinter(len(tasks), "processing", enabled=progress_allowed, logger=run_logger)
@@ -968,5 +1147,13 @@ def run(
         "skipped_items": skipped_items,
         "skipped_stale": skipped_stale,
         "lock_conflicts": lock_conflicts,
+        "config": {
+            "profile": active_profile,
+            "backend": backend_name,
+            "device": device,
+            "compute_type": compute_type,
+            "beam_size": beam_size,
+            "profiling_enabled": profile,
+        },
     }
     return _finalize(summary)
