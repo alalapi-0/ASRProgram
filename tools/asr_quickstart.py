@@ -71,11 +71,15 @@ def download_model(models_dir: str):
         sys.exit(2)  # 退出程序，返回特定错误码
     token = detect_hf_token()
     if token:
-        print(f">>> 检测到 Hugging Face Token：{mask_token(token)}")
+        print(f"🔑 已检测到 Hugging Face Token：{mask_token(token)}")
     else:
-        print(
-            ">>> 未检测到 Hugging Face Token。若下载公开模型失败/返回 401，可参考下方提示配置 token。"
-        )
+        print("⚠️ 未检测到 Hugging Face Token。若遇到 401/403，可参考下方提示快速配置。")
+        print("   · 打开 https://huggingface.co/settings/tokens 新建 Read token")
+        print("   · Windows: setx HUGGINGFACE_HUB_TOKEN \"hf_xxx\"")
+        print("   · Linux/macOS: export HUGGINGFACE_HUB_TOKEN=hf_xxx 或执行 huggingface-cli login")
+    print("\n💡 首次下载 large-v2 约需 3GB 空间，速度取决于网络状况。")
+    print("   若看到 huggingface_hub 的 UserWarning/FutureWarning 属于正常提示，可忽略。")
+    print("   进度条长时间停留属常见现象，请耐心等待或更换网络后重试。\n")
     cmd = [
         sys.executable, str(downloader),  # 使用当前解释器执行下载脚本
         "--backend", FIXED_BACKEND,  # 指定后端为 faster-whisper
@@ -86,13 +90,12 @@ def download_model(models_dir: str):
         cmd.extend(["--hf-token", token])
     rc = run(cmd)  # 执行下载命令
     if rc != 0:  # 判断下载是否成功
-        print("模型下载失败，请检查网络或稍后重试。")  # 输出失败提示
+        print("❌ 模型下载失败，请检查网络或稍后重试。")  # 输出失败提示
         if not token:
-            print("如果看到 401/403 错误，请到 https://huggingface.co/settings/tokens 创建 Read token。")
-            print("Windows: setx HUGGINGFACE_HUB_TOKEN \"hf_xxx\"")
-            print("Linux/macOS: export HUGGINGFACE_HUB_TOKEN=hf_xxx")
-            print("或执行：huggingface-cli login --token hf_xxx")
+            print("提示：large 系列模型通常需要有效的 Hugging Face Token 才能顺利下载。")
         sys.exit(rc)  # 以原退出码终止程序
+    else:
+        print("✅ 模型已就绪，后续转写会直接复用缓存文件。")
 
 def main():
     print("=== ASR QuickStart（中文词级转写｜固定 large-v2）===")  # 在启动时输出标题
