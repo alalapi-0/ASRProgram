@@ -28,6 +28,20 @@ FIXED_MODEL = "large-v3"  # 固定模型名称为 large-v3，满足需求
 # 固定后端
 FIXED_BACKEND = "faster-whisper"  # 固定后端为 faster-whisper，避免其它选项
 
+
+def detect_hf_token() -> str:
+    """读取 Hugging Face Token，优先 HUGGINGFACE_HUB_TOKEN，再 HF_TOKEN。"""
+
+    return os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HF_TOKEN") or ""
+
+
+def mask_token(token: str) -> str:
+    """仅保留 token 前后 3 位，中间使用 *** 保护。"""
+
+    if len(token) <= 6:
+        return "***"
+    return f"{token[:3]}***{token[-3:]}"
+
 def ask(prompt: str, default: str = "") -> str:
     """简单的交互输入：回车取默认值。"""
     s = input(f"{prompt}（回车默认：{default}）：").strip()  # 提示用户输入并移除首尾空白
@@ -55,15 +69,29 @@ def download_model(models_dir: str):
     if not downloader.exists():  # 检查下载脚本是否存在
         print("缺少 scripts/download_model.py，无法自动下载模型。请先补齐脚本。")  # 给出错误提示
         sys.exit(2)  # 退出程序，返回特定错误码
+    token = detect_hf_token()
+    if token:
+        print(f">>> 检测到 Hugging Face Token：{mask_token(token)}")
+    else:
+        print(
+            ">>> 未检测到 Hugging Face Token。若下载公开模型失败/返回 401，可参考下方提示配置 token。"
+        )
     cmd = [
         sys.executable, str(downloader),  # 使用当前解释器执行下载脚本
         "--backend", FIXED_BACKEND,  # 指定后端为 faster-whisper
         "--model", FIXED_MODEL,  # 指定模型为 large-v3
         "--models-dir", models_dir  # 指定模型缓存目录
     ]
+    if token:
+        cmd.extend(["--hf-token", token])
     rc = run(cmd)  # 执行下载命令
     if rc != 0:  # 判断下载是否成功
         print("模型下载失败，请检查网络或稍后重试。")  # 输出失败提示
+        if not token:
+            print("如果看到 401/403 错误，请到 https://huggingface.co/settings/tokens 创建 Read token。")
+            print("Windows: setx HUGGINGFACE_HUB_TOKEN \"hf_xxx\"")
+            print("Linux/macOS: export HUGGINGFACE_HUB_TOKEN=hf_xxx")
+            print("或执行：huggingface-cli login --token hf_xxx")
         sys.exit(rc)  # 以原退出码终止程序
 
 def main():

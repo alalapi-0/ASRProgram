@@ -275,6 +275,21 @@ For community questions, open an issue or discussion in the repository.
 2. 程序自动调用 `scripts/download_model.py` 下载 **large-v3** 模型（落在 `~/.cache/asrprogram/models`，可自定义）。
 3. 程序自动运行转写（`--language zh`），并在输出目录生成 JSON 文件。
 
+#### Hugging Face Token（下载受限/403/401 时）
+
+部分模型仓库需要登录凭据，即便是公开模型也可能因为频率限制导致 401/403。可以按以下步骤配置 Token：
+
+1. 打开 [https://huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)，创建一个 **Read** 权限的 Token（或细粒度 Token，仅勾选最小下载权限）。
+2. 配置环境变量（任选其一）：
+   * **Windows**（命令提示符）：`setx HUGGINGFACE_HUB_TOKEN "hf_xxx"`
+   * **Linux/macOS**：`export HUGGINGFACE_HUB_TOKEN=hf_xxx`
+3. 亦可使用 `huggingface-cli login --token hf_xxx` 保存到本机凭据。
+4. 验证环境变量：
+
+   ```bash
+   python -c "import os; print(os.getenv('HUGGINGFACE_HUB_TOKEN'))"
+   ```
+
 > 备注：
 >
 > * 使用大模型在 **CPU** 环境下会较慢，建议 VPS 具备较充足的内存（≥16GB）；
