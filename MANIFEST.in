@@ -1,0 +1,18 @@
+# 注释：包含 README 以供 PyPI 展示
+include README.md
+# 注释：包含许可证，满足开源分发要求
+include LICENSE
+# 注释：包含版本文件，方便程序读取
+include VERSION
+# 注释：包含变更记录，便于审查发布历史
+include CHANGELOG.md
+# 注释：包含运行时依赖清单
+include requirements.txt
+# 注释：递归包含配置文件
+recursive-include config *
+# 注释：递归包含模式 Schema
+recursive-include schemas *
+# 注释：递归包含脚本目录
+recursive-include scripts *
+# 注释：排除可能的临时或缓存文件
+prune __pycache__

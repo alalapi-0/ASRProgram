@@ -1,0 +1,37 @@
+# MIT License  # 注释：声明所选许可证类型
+
+# Copyright (c) 2025 ASRProgram Developers
+# 注释：版权方声明，需在再分发时保留
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# 注释：授予获取副本的任何人权限
+# of this software and associated documentation files (the "Software"), to deal
+# 注释：明确软件及文档属于许可范围
+# in the Software without restriction, including without limitation the rights
+# 注释：无使用限制，列举可执行操作
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# 注释：允许使用、复制、修改、合并、发布、分发、再许可及销售
+# copies of the Software, and to permit persons to whom the Software is
+# 注释：允许将相同权限授予软件接收者
+# furnished to do so, subject to the following conditions:
+# 注释：但需满足以下条件
+
+# The above copyright notice and this permission notice shall be included in all
+# 注释：要求保留版权与许可声明
+# copies or substantial portions of the Software.
+# 注释：适用于所有副本或重要部分
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# 注释：声明不提供任何明示或暗示的保证
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# 注释：包括但不限于适销性保证
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# 注释：亦不保证适用于特定目的或不侵权
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# 注释：作者或版权持有人不承担索赔、损害责任
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# 注释：无论合同、侵权或其他行为导致
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# 注释：因软件或软件使用造成的一切责任均不承担
+# SOFTWARE.
+# 注释：总结责任豁免
