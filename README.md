@@ -220,6 +220,62 @@ For community questions, open an issue or discussion in the repository.
 <!-- Purpose: Closing remark -->
 感谢使用 ASRProgram，期待社区贡献与反馈！
 
+## 🇨🇳 固定大模型中文转写（Windows & Ubuntu）
+
+本项目提供一个**超简入口**，固定使用 `faster-whisper` 的 **large-v3** 大模型，语言固定为中文（`--language zh`）。  
+你只需要输入「音频路径」与「输出目录」，其余流程自动处理（含**自动下载模型**）。
+
+### 快速开始
+
+#### Windows
+1. 安装 Python 3.10+ 与 ffmpeg，并将 ffmpeg 的 `bin` 加入 `PATH`。  
+2. 安装依赖：
+   ```bash
+   python -m pip install -U pip
+   pip install -r requirements.txt
+   ```
+3. 运行一键脚本或主入口：
+   ```bash
+   scripts\run_transcribe.bat
+   # 或
+   python tools\asr_quickstart.py
+   ```
+
+#### Ubuntu（VPS 常见系统：Ubuntu 就是 Linux 的一种发行版）
+1. 安装系统依赖：
+   ```bash
+   sudo apt-get update
+   sudo apt-get install -y ffmpeg python3-pip
+   ```
+2. 安装 Python 依赖：
+   ```bash
+   python3 -m pip install -U pip
+   pip3 install -r requirements.txt
+   ```
+3. 运行一键脚本或主入口：
+   ```bash
+   chmod +x scripts/run_transcribe.sh
+   ./scripts/run_transcribe.sh
+   # 或
+   python3 tools/asr_quickstart.py
+   ```
+
+### 运行流程
+1. 程序会提示你输入：
+   - 输入路径：可以是单个音频文件或一个包含音频的文件夹；
+   - 输出目录：`*.segments.json`（段级）与 `*.words.json`（词级）会保存到这里。
+2. 程序自动调用 `scripts/download_model.py` 下载 `large-v3` 模型（落在 `~/.cache/asrprogram/models`，可自定义）。
+3. 程序自动运行转写（`--language zh`），并在输出目录生成 JSON 文件。
+
+### 备注
+- 使用大模型在 CPU 环境下会较慢，建议 VPS 具备较充足的内存（≥16GB）。
+- 若 CLI 支持 `--device` / `--compute-type` 参数，CPU 环境可考虑 `int8` / `int8_float16` 节省内存；CUDA 环境可用 `float16`。
+
+### 常见问题
+- **Ubuntu 是 Linux 吗？** 是的，Ubuntu 是最常见的 Linux 发行版之一。
+- **为什么不提供 tiny/small 选项？** 目标是生成高质量的词级时间戳，大模型在对齐与鲁棒性上更稳定，所以入口已固定为 `large-v3`。
+- **模型下载失败？** 请检查网络或重试；也可提前在本地下载好模型并把模型目录传给程序（默认 `~/.cache/asrprogram/models`）。
+
 ☁️ 云端/CI 真实转写（自动下载模型）
 
 本项目提供一套 GitHub Actions 工作流，会在云端 runner 上完成以下步骤：
