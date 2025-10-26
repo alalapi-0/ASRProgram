@@ -1,0 +1,223 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://asrprogram.dev/schemas/segments.schema.json",
+  "title": "ASRProgram Segment Result Schema v1",
+  "description": "约束段级转写结果的顶层结构，覆盖段数组及嵌套词条。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "language",
+    "audio",
+    "backend",
+    "meta",
+    "segments",
+    "generated_at"
+  ],
+  "properties": {
+    "schema": {
+      "const": "asrprogram.segmentset.v1",
+      "description": "固定 schema 标签，用于段级结果版本管理。"
+    },
+    "language": {
+      "type": "string",
+      "minLength": 1,
+      "description": "段级结果的语言代码，通常与词级一致。"
+    },
+    "audio": {
+      "$ref": "#/$defs/audioInfo",
+      "description": "音频元信息块，与词级结构共享定义。"
+    },
+    "backend": {
+      "$ref": "#/$defs/backendInfo",
+      "description": "后端识别器信息，与词级结构共享定义。"
+    },
+    "meta": {
+      "type": "object",
+      "description": "用于携带 postprocess 统计、schema_version 等附加键值。"
+    },
+    "segments": {
+      "type": "array",
+      "description": "段级结果数组，每个元素包含文本、时间戳与嵌套词列表。",
+      "items": {
+        "$ref": "#/$defs/segmentEntry"
+      }
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC 时间戳，使用 ISO8601 格式记录生成时间。"
+    }
+  },
+  "$defs": {
+    "audioInfo": {
+      "type": "object",
+      "description": "描述音频输入的核心属性。",
+      "required": [
+        "path",
+        "duration_sec",
+        "language"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "原始音频的路径或 URI，保留执行当时的绝对路径。"
+        },
+        "duration_sec": {
+          "type": "number",
+          "minimum": 0,
+          "description": "音频持续时长，单位为秒，非负浮点数。"
+        },
+        "language": {
+          "type": "string",
+          "minLength": 1,
+          "description": "后端判定或 CLI 指定的语言代码。"
+        },
+        "hash_sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "可选的输入文件 SHA-256，完整性校验关闭时为 null。"
+        },
+        "sample_rate_hz": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "可选采样率（Hz），若未知或未记录则为 null。"
+        }
+      }
+    },
+    "backendInfo": {
+      "type": "object",
+      "description": "标识产出该结果的转写后端。",
+      "required": [
+        "name"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "后端名称，例如 dummy/faster-whisper/whisper.cpp。"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "可选模型标识，允许 null 表示未指定。"
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "可选后端版本号。"
+        }
+      }
+    },
+    "wordEntry": {
+      "type": "object",
+      "description": "单个词条，包含文本内容与时间戳。",
+      "required": [
+        "text",
+        "start",
+        "end",
+        "segment_id",
+        "index"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "description": "词条文本内容，保持原始大小写。"
+        },
+        "start": {
+          "type": "number",
+          "minimum": 0,
+          "description": "词条起始时间（秒），非负浮点数。"
+        },
+        "end": {
+          "type": "number",
+          "minimum": 0,
+          "description": "词条结束时间（秒），应大于等于 start。"
+        },
+        "confidence": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "词级置信度，范围 0~1，若后端不返回则为 null。"
+        },
+        "segment_id": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "归属段 ID，用于在段级数组中建立关联。"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "词条在整段音频中的顺序索引，从 0 开始。"
+        }
+      }
+    },
+    "segmentEntry": {
+      "type": "object",
+      "description": "单个段级条目，聚合若干词条并记录平均置信度。",
+      "required": [
+        "id",
+        "text",
+        "start",
+        "end",
+        "words"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "段编号，从 0 开始递增。"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "description": "段落文本内容。"
+        },
+        "start": {
+          "type": "number",
+          "minimum": 0,
+          "description": "段起始时间（秒），非负浮点数。"
+        },
+        "end": {
+          "type": "number",
+          "minimum": 0,
+          "description": "段结束时间（秒），应大于等于 start。"
+        },
+        "avg_conf": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1,
+          "description": "段内词条置信度的平均值，可为空表示缺失。"
+        },
+        "words": {
+          "type": "array",
+          "description": "属于该段的词条数组，可为空数组。",
+          "items": {
+            "$ref": "#/$defs/wordEntry"
+          }
+        }
+      }
+    }
+  }
+}

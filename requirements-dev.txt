@@ -1,0 +1,6 @@
+# pytest：Python 单元测试框架，覆盖单元/集成/冒烟测试。
+pytest>=7.4
+# jsonschema：用于加载并校验 words/segments JSON 结构。
+jsonschema>=4.22
+# pytest-cov：可选覆盖率插件，便于后续追踪测试覆盖率。
+pytest-cov>=4.1
