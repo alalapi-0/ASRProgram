@@ -234,7 +234,9 @@ For community questions, open an issue or discussion in the repository.
    python -m pip install -U pip
    pip install -r requirements.txt
    ```
+
 3. 运行一键脚本或主入口：
+
    ```bash
    scripts\run_transcribe.bat
    # 或
@@ -242,17 +244,21 @@ For community questions, open an issue or discussion in the repository.
    ```
 
 #### Ubuntu（VPS 常见系统：Ubuntu 就是 Linux 的一种发行版）
+
 1. 安装系统依赖：
+
    ```bash
    sudo apt-get update
    sudo apt-get install -y ffmpeg python3-pip
    ```
 2. 安装 Python 依赖：
+
    ```bash
    python3 -m pip install -U pip
    pip3 install -r requirements.txt
    ```
 3. 运行一键脚本或主入口：
+
    ```bash
    chmod +x scripts/run_transcribe.sh
    ./scripts/run_transcribe.sh
@@ -261,66 +267,21 @@ For community questions, open an issue or discussion in the repository.
    ```
 
 ### 运行流程
+
 1. 程序会提示你输入：
-   - 输入路径：可以是单个音频文件或一个包含音频的文件夹；
-   - 输出目录：`*.segments.json`（段级）与 `*.words.json`（词级）会保存到这里。
-2. 程序自动调用 `scripts/download_model.py` 下载 `large-v3` 模型（落在 `~/.cache/asrprogram/models`，可自定义）。
+
+   * **输入路径**：可以是单个音频文件或一个包含音频的文件夹；
+   * **输出目录**：`*.segments.json`（段级）与 `*.words.json`（词级）会保存到这里。
+2. 程序自动调用 `scripts/download_model.py` 下载 **large-v3** 模型（落在 `~/.cache/asrprogram/models`，可自定义）。
 3. 程序自动运行转写（`--language zh`），并在输出目录生成 JSON 文件。
 
-### 备注
-- 使用大模型在 CPU 环境下会较慢，建议 VPS 具备较充足的内存（≥16GB）。
-- 若 CLI 支持 `--device` / `--compute-type` 参数，CPU 环境可考虑 `int8` / `int8_float16` 节省内存；CUDA 环境可用 `float16`。
+> 备注：
+>
+> * 使用大模型在 **CPU** 环境下会较慢，建议 VPS 具备较充足的内存（≥16GB）；
+> * 若你的 CLI 支持 `--device` / `--compute-type` 参数，CPU 环境可考虑 `int8` / `int8_float16` 节省内存；CUDA 环境可用 `float16`。
 
 ### 常见问题
-- **Ubuntu 是 Linux 吗？** 是的，Ubuntu 是最常见的 Linux 发行版之一。
-- **为什么不提供 tiny/small 选项？** 目标是生成高质量的词级时间戳，大模型在对齐与鲁棒性上更稳定，所以入口已固定为 `large-v3`。
-- **模型下载失败？** 请检查网络或重试；也可提前在本地下载好模型并把模型目录传给程序（默认 `~/.cache/asrprogram/models`）。
 
-☁️ 云端/CI 真实转写（自动下载模型）
-
-本项目提供一套 GitHub Actions 工作流，会在云端 runner 上完成以下步骤：
-	1.	安装 Python 3.10 与 ffmpeg；
-	2.	安装项目依赖；
-	3.	下载 faster-whisper 模型（tiny） 到缓存目录（~/.cache/asrprogram/models）；
-	4.	动态合成一段 1.5 秒 WAV 音频（无需提交音频样本）；
-	5.	运行 CLI，生成 段级 与 词级 JSON；
-	6.	校验输出结构并上传产物作为 Artifact。
-
-	•	工作流文件：.github/workflows/asr_full.yml
-	•	模型缓存：actions/cache 已启用；后续运行会复用模型，加速 CI。
-	•	若你想在 CI 中切换模型，可在 asr_full.yml 的“Download tiny model”步骤，将 --model tiny 改为 small|base|...（注意 CI 时长）。
-
-本地一键运行（含自动下载 tiny 模型）
-
-# 一次性准备（需要 ffmpeg；若没有，请用系统包管理器安装）
-python -m pip install -U pip
-pip install -r requirements.txt
-
-# 下载 tiny 模型到本地缓存（默认 ~/.cache/asrprogram/models）
-python scripts/download_model.py --backend faster-whisper --model tiny
-
-# 生成一个测试音频并跑 CLI
-python .github/scripts/gen_sine_wav.py tmp_audio/beep.wav
-python -m src.cli.main \
-  --input tmp_audio \
-  --out-dir out \
-  --backend faster-whisper \
-  --language auto \
-  --segments-json true \
-  --overwrite true \
-  --verbose
-
-产物位置：out/*.words.json 与 out/*.segments.json。
-
-🛠 GitHub Actions 手动设置要点
-	1.	进入仓库 Settings → Actions → General：
-		•	Actions permissions 请选择 “Allow all actions”。
-	2.	如组织策略限制第三方 Actions，请把下面两个加入允许列表：
-		•	actions/checkout@v4
-		•	actions/setup-python@v5
-	3.	（可选）分支保护：若启用，请将 Full ASR (words.json) 设为必需检查。
-	4.	本工作流 不需要任何 Secrets。
-	5.	若 CI 仍超时：
-		•	保持 --model tiny；
-		•	确保模型缓存命中（查看 “Cache ASR models” 步骤日志）；
-		•	机器繁忙时可重复触发 Re-run all jobs。
+* **Ubuntu 是 Linux 吗？** 是的，Ubuntu 是最常见的 Linux 发行版之一。
+* **为什么不提供 tiny/small 选项？** 你的目标是生成高质量的**词级时间戳**，大模型在对齐与鲁棒性上更稳定，所以入口已固定为 `large-v3`。
+* **模型下载失败？** 请检查网络或重试；也可提前在本地下载好模型并把模型目录传给程序（默认 `~/.cache/asrprogram/models`）。
