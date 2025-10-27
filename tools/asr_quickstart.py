@@ -1,161 +1,209 @@
-# -*- coding: utf-8 -*-  # 指定源码使用 UTF-8 编码，兼容中文注释与提示
-"""
-ASR QuickStart（固定大模型，中文转写）
------------------------------------
-- 固定后端：faster-whisper
-- 固定语言：zh（中文）
-- 固定模型：large-v2（不再提供 tiny/small 等选项）
-- 只让用户输入：输入路径（文件或文件夹）和输出目录
-- 自动下载模型（scripts/download_model.py）
-- Windows / Linux(Ubuntu) 通用
-"""
+"""全自动中文 ASR 快速启动脚本，固定 faster-whisper large-v2 模型。"""  # 模块文档字符串说明脚本功能。
 
-import os  # 导入 os 模块以便处理环境变量与路径展开等操作
-import sys  # 导入 sys 模块以便获取当前 Python 解释器路径并执行退出
-import subprocess  # 导入 subprocess 用于调用外部命令
-from pathlib import Path  # 从 pathlib 导入 Path 以便进行路径操作
+from __future__ import annotations  # 启用前向注解以增强类型提示兼容性。
 
-# 仓库根目录（tools/ 上一层）
-REPO_ROOT = Path(__file__).resolve().parents[1]  # 计算项目根目录，便于定位脚本
-# 默认模型缓存目录（与项目其他脚本一致）
-DEFAULT_MODELS_DIR = os.path.expanduser("~/.cache/asrprogram/models")  # 设定模型缓存目录，支持用户覆写
-# 默认输入/输出目录（可根据需要改成你的常用路径）
-DEFAULT_INPUT_DIR = str((REPO_ROOT / "audio").resolve())  # 给出默认输入目录，帮助新用户快速上手
-DEFAULT_OUTPUT_DIR = str((REPO_ROOT / "out").resolve())  # 给出默认输出目录，集中保存结果
+import argparse  # 导入 argparse 用于处理命令行参数。
+import os  # 导入 os 以管理环境变量与路径。
+import subprocess  # 导入 subprocess 以调用项目 CLI。
+import sys  # 导入 sys 以访问解释器路径与标准流。
+from pathlib import Path  # 导入 Path 以进行路径拼接与遍历。
+from typing import List, Optional  # 导入类型注解便于阅读与检查。
 
-# 固定使用大模型
-FIXED_MODEL = "large-v2"  # 固定模型名称为 large-v2，满足需求
-# 固定后端
-FIXED_BACKEND = "faster-whisper"  # 固定后端为 faster-whisper，避免其它选项
+os.environ.setdefault("PYTHONUNBUFFERED", "1")  # 设置环境变量确保无缓冲输出。
+try:
+    sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]  # 尝试启用行缓冲输出。
+except Exception:  # noqa: BLE001
+    pass  # 某些运行时不支持 reconfigure，此时忽略即可。
+
+AUDIO_EXTENSIONS = {".wav", ".flac", ".m4a", ".mp3", ".aac", ".ogg"}  # 允许处理的音频扩展名集合。
+DEFAULT_INPUT = Path("./Audio").resolve()  # 默认输入目录。
+DEFAULT_OUTPUT = Path("./out").resolve()  # 默认输出目录。
+DEFAULT_MODELS_DIR = Path(os.path.expanduser("~/.cache/asrprogram/models")).resolve()  # 默认模型缓存路径。
+SCRIPT_ROOT = Path(__file__).resolve().parent.parent  # 推导项目根目录以便定位脚本。
+DOWNLOAD_SCRIPT = SCRIPT_ROOT / "scripts" / "download_model.py"  # 下载脚本路径。
 
 
-def detect_hf_token() -> str:
-    """读取 Hugging Face Token，优先 HUGGINGFACE_HUB_TOKEN，再 HF_TOKEN。"""
+class TeeStream:
+    """简单的 tee 实现：将写入同时转发到控制台与日志文件。"""  # 类说明。
 
-    return os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HF_TOKEN") or ""
+    def __init__(self, stream: object, log_path: Path) -> None:
+        self._stream = stream  # 保存原始控制台流。
+        self._log_path = log_path  # 保存日志文件路径。
+        self._log_path.parent.mkdir(parents=True, exist_ok=True)  # 确保日志目录存在。
+        self._log_file = open(self._log_path, "a", encoding="utf-8", buffering=1)  # 以行缓冲方式打开日志文件。
+
+    def write(self, data: str) -> None:
+        self._stream.write(data)  # 先写入原始流以保持即时输出。
+        self._stream.flush()  # 立即刷新控制台缓冲。
+        self._log_file.write(data)  # 再写入日志文件。
+        self._log_file.flush()  # 保证日志文件实时更新。
+
+    def flush(self) -> None:
+        self._stream.flush()  # 刷新控制台流。
+        self._log_file.flush()  # 刷新日志文件。
+
+    def close(self) -> None:
+        self._log_file.close()  # 关闭日志文件句柄。
 
 
-def mask_token(token: str) -> str:
-    """仅保留 token 前后 3 位，中间使用 *** 保护。"""
+def parse_args() -> argparse.Namespace:
+    """定义并解析命令行参数。"""  # 函数说明。
 
-    if len(token) <= 6:
-        return "***"
-    return f"{token[:3]}***{token[-3:]}"
+    parser = argparse.ArgumentParser(description="Zero-interaction Chinese ASR quickstart")  # 创建解析器。
+    parser.add_argument("--input", default=None, help="音频文件或文件夹路径，默认 ./Audio")  # 输入路径参数。
+    parser.add_argument("--out-dir", default=None, help="输出目录，默认 ./out")  # 输出目录参数。
+    parser.add_argument("--models-dir", default=None, help="模型缓存目录，默认 ~/.cache/asrprogram/models")  # 模型目录。
+    parser.add_argument("--download", action="store_true", help="启动前自动检查并下载模型")  # 是否下载模型。
+    parser.add_argument("--no-prompt", action="store_true", help="禁用所有交互式提问，全自动运行")  # 无交互标记。
+    parser.add_argument("--tee-log", default=None, help="将标准输出同时写入指定日志文件")  # tee 日志路径。
+    parser.add_argument("--num-workers", type=int, default=1, help="传递给主 CLI 的并发 worker 数")  # worker 数量。
+    parser.add_argument("--device", default=None, help="可选设备参数传递给主 CLI")  # 设备设置。
+    parser.add_argument("--compute-type", default=None, help="可选精度参数传递给主 CLI")  # 精度设置。
+    parser.add_argument("--hf-token", default=None, help="可选 Hugging Face token，传递给下载脚本")  # Token 覆盖。
+    return parser.parse_args()  # 返回解析结果。
 
-def ask(prompt: str, default: str = "") -> str:
-    """简单的交互输入：回车取默认值。"""
-    s = input(f"{prompt}（回车默认：{default}）：").strip()  # 提示用户输入并移除首尾空白
-    return s or default  # 若用户直接回车则返回默认值
 
-def which(cmd: str):
-    """跨平台查找命令是否在 PATH 内。"""
-    from shutil import which as _which  # 延迟导入 shutil.which 函数
-    return _which(cmd)  # 返回命令绝对路径，若不存在则返回 None
+def prompt_value(current: Optional[str], default: Path, message: str, disabled: bool) -> Path:
+    """根据 --no-prompt 设置决定是否交互获取路径。"""  # 函数说明。
 
-def need_ffmpeg_hint():
-    """缺少 ffmpeg 时的友好提示。"""
-    print("未检测到 ffmpeg/ffprobe。请先安装后再运行：")  # 输出缺少 ffmpeg 的提醒
-    print(" - Windows: 安装 ffmpeg 并把 bin 加入 PATH")  # 提示 Windows 用户的安装方法
-    print(" - Ubuntu:  sudo apt-get update && sudo apt-get install -y ffmpeg")  # 提示 Ubuntu 用户的安装方法
+    if current:  # 若命令行已提供参数。
+        return Path(current).expanduser().resolve()  # 直接解析并返回。
+    if disabled:  # 若禁用提示则使用默认值。
+        return default  # 返回预设路径。
+    user_input = input(f"{message} (默认: {default}): ").strip()  # 询问用户输入。
+    return Path(user_input or str(default)).expanduser().resolve()  # 返回用户输入或默认值。
 
-def run(cmd, env=None):
-    """打印并执行命令，返回退出码。"""
-    print("\n$ " + " ".join(cmd))  # 在执行前打印命令，方便用户查看
-    return subprocess.call(cmd, env=env)  # 调用外部命令并返回退出码
 
-def download_model(models_dir: str) -> str:
-    """调用项目自带的下载器脚本，下载 large-v2 模型并返回本地目录。"""
-    downloader = REPO_ROOT / "scripts" / "download_model.py"  # 构造下载脚本的路径
-    if not downloader.exists():  # 检查下载脚本是否存在
-        print("缺少 scripts/download_model.py，无法自动下载模型。请先补齐脚本。")  # 给出错误提示
-        sys.exit(2)  # 退出程序，返回特定错误码
-    token = detect_hf_token()
-    if token:
-        print(f"🔑 已检测到 Hugging Face Token：{mask_token(token)}")
+def discover_audio_files(target: Path) -> List[Path]:
+    """递归扫描目标路径并返回按文件名排序的音频文件列表。"""  # 函数说明。
+
+    if not target.exists():  # 若目标不存在。
+        raise FileNotFoundError(f"输入路径不存在: {target}")  # 抛出错误提示。
+    if target.is_file():  # 若目标是单个文件。
+        files = [target]  # 构造单元素列表。
     else:
-        print("⚠️ 未检测到 Hugging Face Token。若遇到 401/403，可参考下方提示快速配置。")
-        print("   · 打开 https://huggingface.co/settings/tokens 新建 Read token")
-        print("   · Windows: setx HUGGINGFACE_HUB_TOKEN \"hf_xxx\"")
-        print("   · Linux/macOS: export HUGGINGFACE_HUB_TOKEN=hf_xxx 或执行 huggingface-cli login")
-    print("\n💡 首次下载 large-v2 约需 3GB 空间，速度取决于网络状况。")
-    print("   若看到 huggingface_hub 的 UserWarning/FutureWarning 属于正常提示，可忽略。")
-    print("   进度条长时间停留属常见现象，请耐心等待或更换网络后重试。\n")
-    cmd = [
-        sys.executable, str(downloader),  # 使用当前解释器执行下载脚本
-        "--backend", FIXED_BACKEND,  # 指定后端为 faster-whisper
-        "--model", FIXED_MODEL,  # 指定模型为 large-v2
-        "--models-dir", models_dir  # 指定模型缓存目录
+        files = [path for path in target.rglob("*") if path.is_file()]  # 递归收集所有文件。
+    audio_files = [path for path in files if path.suffix.lower() in AUDIO_EXTENSIONS]  # 过滤音频扩展。
+    audio_files.sort(key=lambda p: (p.name.lower(), str(p)))  # 按文件名排序，同时以完整路径稳定排序。
+    return audio_files  # 返回有序列表。
+
+
+def run_subprocess(command: List[str]) -> int:
+    """执行子进程并返回退出码，同时保证实时输出。"""  # 函数说明。
+
+    print("$ " + " ".join(command))  # 打印命令方便调试。
+    return subprocess.call(command)  # 调用命令并返回退出状态。
+
+
+def build_cli_command(audio_path: Path, out_dir: Path, models_dir: Path, args: argparse.Namespace) -> List[str]:
+    """根据输入参数构造调用 src.cli.main 的命令列表。"""  # 函数说明。
+
+    command: List[str] = [
+        sys.executable,  # 使用当前 Python 解释器。
+        "-m",
+        "src.cli.main",  # 调用项目主 CLI。
+        "--input",
+        str(audio_path),  # 指定单个音频文件。
+        "--out-dir",
+        str(out_dir),  # 指定输出目录。
+        "--backend",
+        "faster-whisper",  # 固定后端。
+        "--language",
+        "zh",  # 固定语言。
+        "--segments-json",
+        "true",  # 始终生成段级 JSON。
+        "--overwrite",
+        "true",  # 允许覆盖旧结果。
+        "--num-workers",
+        str(max(1, args.num_workers)),  # 传递 worker 数，至少为 1。
+        "--verbose",  # 启用详细日志，便于排查。
     ]
-    if token:
-        cmd.extend(["--hf-token", token])
-    rc = run(cmd)  # 执行下载命令
-    if rc != 0:  # 判断下载是否成功
-        print("❌ 模型下载失败，请检查网络或稍后重试。")  # 输出失败提示
-        if not token:
-            print("提示：large 系列模型通常需要有效的 Hugging Face Token 才能顺利下载。")
-        sys.exit(rc)  # 以原退出码终止程序
-    else:
-        print("✅ 模型已就绪，后续转写会直接复用缓存文件。")
-    target_dir = Path(models_dir) / FIXED_BACKEND / FIXED_MODEL  # 计算模型缓存目录
-    return str(target_dir.resolve())  # 返回规范化后的模型目录，供主程序复用
+    model_root = (models_dir / "faster-whisper" / "large-v2").resolve()  # 解析固定模型的缓存目录。
+    command.extend(["--set", f"runtime.model={model_root}"])  # 指定模型路径确保使用缓存。
+    if args.device:  # 若用户指定设备。
+        command.extend(["--set", f"runtime.device={args.device}"])  # 将设备参数传递给 CLI。
+    if args.compute_type:  # 若用户指定精度。
+        command.extend(["--set", f"runtime.compute_type={args.compute_type}"])  # 将精度参数传递给 CLI。
+    if args.tee_log:  # 若启用 tee 日志。
+        command.extend(["--tee-log", str(Path(args.tee_log).expanduser().resolve())])  # 传递给主 CLI 以同步日志文件。
+    return command  # 返回命令列表。
 
-def main():
-    print("=== ASR QuickStart（中文词级转写｜固定 large-v2）===")  # 在启动时输出标题
 
-    # 简单环境检查：ffmpeg/ffprobe 是否可用（缺失也允许继续）
-    if not which("ffmpeg") or not which("ffprobe"):  # 检查 ffmpeg 和 ffprobe 是否都在 PATH 中
-        need_ffmpeg_hint()  # 若缺失则输出提示
-        proceed = input("继续运行也行，但可能影响时长探测。是否继续？(y/N)：").strip().lower()  # 询问用户是否继续
-        if proceed not in ("y", "yes"):  # 若用户不同意继续
-            sys.exit(1)  # 退出程序
+def invoke_downloader(models_dir: Path, token: Optional[str]) -> None:
+    """调用下载脚本确保模型存在。"""  # 函数说明。
 
-    # 1) 输入/输出
-    in_path = ask("输入 文件/文件夹 路径（中文音频所在处）", DEFAULT_INPUT_DIR)  # 询问音频输入路径
-    out_dir = ask("输出目录（保存 JSON）", DEFAULT_OUTPUT_DIR)  # 询问输出目录
-    Path(out_dir).mkdir(parents=True, exist_ok=True)  # 确保输出目录存在
-
-    # 2) 模型缓存目录（一般保持默认即可）
-    models_dir = ask("模型缓存目录", DEFAULT_MODELS_DIR)  # 询问模型缓存目录
-    Path(models_dir).mkdir(parents=True, exist_ok=True)  # 确保模型目录存在
-
-    # 3) 下载模型（若未下载过）
-    print("\n>>> 检查/下载模型：", FIXED_MODEL)  # 提示用户即将检查并下载模型
-    model_path = download_model(models_dir)  # 调用下载函数并获取本地模型路径
-
-    # 4) 开始转写（中文、段级+词级）
-    print("\n>>> 开始转写（中文，large-v2） ...")  # 提示即将开始转写
-    cmd = [
-        sys.executable, "-m", "src.cli.main",  # 使用模块方式调用 CLI 主入口
-        "--input", in_path,  # 设置输入路径
-        "--out-dir", out_dir,  # 设置输出目录
-        "--backend", FIXED_BACKEND,  # 指定后端
-        "--language", "zh",          # 固定中文语言
-        "--segments-json", "true",   # 启用段级 JSON 输出
-        "--overwrite", "true",  # 允许覆盖现有文件
-        "--num-workers", "1",        # 固定单线程执行
-        "--verbose"  # 打印详细日志
-        # 如果你的 CLI 支持，你可以在这里进一步固定设备/精度：
-        #   CPU:  --device cpu --compute-type int8 或 int8_float16
-        #   CUDA: --device cuda --compute-type float16
+    if not DOWNLOAD_SCRIPT.exists():  # 若下载脚本缺失。
+        raise FileNotFoundError(f"缺少下载脚本: {DOWNLOAD_SCRIPT}")  # 提示错误。
+    command = [
+        sys.executable,  # 使用当前解释器。
+        str(DOWNLOAD_SCRIPT),  # 下载脚本路径。
+        "--backend",
+        "faster-whisper",  # 固定后端。
+        "--model",
+        "large-v2",  # 固定模型。
+        "--models-dir",
+        str(models_dir),  # 指定模型目录。
     ]
-    cmd.extend(["--set", f"runtime.model={model_path}"])  # 指定使用已下载的本地模型，避免重复拉取
+    if token:  # 若提供 token。
+        command.extend(["--hf-token", token])  # 将 token 传递给脚本。
+    exit_code = run_subprocess(command)  # 执行下载命令。
+    if exit_code != 0:  # 若下载失败。
+        raise RuntimeError("模型下载失败，请检查日志后重试。")  # 抛出异常终止流程。
 
-    # 通过环境变量把模型目录传给主程序（若主程序支持读取）
-    env = os.environ.copy()  # 复制当前环境变量
-    env["ASRPROGRAM_MODELS_DIR"] = models_dir  # 注入模型目录变量，供 CLI 使用
-    env.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")  # Windows 下禁用 Hugging Face 的符号链接警告
 
-    rc = run(cmd, env=env)  # 执行转写命令
+def print_token_hint() -> None:
+    """输出当前 Hugging Face Token 状态并进行遮蔽。"""  # 函数说明。
 
-    if rc == 0:  # 判断转写是否成功
-        print("\n✅ 完成。JSON 已保存到：", out_dir)  # 提示成功信息
-        print("   - *.segments.json（段级时间轴）")  # 提醒段级输出
-        print("   - *.words.json    （词级时间轴）")  # 提醒词级输出
+    token = os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HF_TOKEN")  # 读取环境变量。
+    if token:  # 若 token 存在。
+        masked = f"{token[:8]}***{token[-4:]}" if len(token) > 12 else "***"  # 脱敏 token。
+        print(f"🔑 检测到 Hugging Face Token: {masked}")  # 输出提示。
     else:
-        print("\n❌ 转写失败，请上滚查看报错信息。")  # 提示失败并引导查看日志
+        print("⚠️ 未检测到 Token，若模型受限可能导致 401/403。")  # 无 token 时提醒用户。
 
-if __name__ == "__main__":  # 判断脚本是否直接运行
+
+def main() -> int:
+    """脚本主流程：解析参数、扫描音频并顺序转写。"""  # 函数说明。
+
+    args = parse_args()  # 解析命令行。
+    tee_stream: Optional[TeeStream] = None  # 初始化 tee 流引用。
     try:
-        main()  # 调用主函数
-    except KeyboardInterrupt:
-        print("\n已取消。")  # 捕获 Ctrl+C 并输出友好提示
+        input_path = prompt_value(args.input, DEFAULT_INPUT, "请输入音频路径", args.no_prompt)  # 获取输入路径。
+        output_dir = prompt_value(args.out_dir, DEFAULT_OUTPUT, "请输入输出目录", args.no_prompt)  # 获取输出目录。
+        models_dir = prompt_value(args.models_dir, DEFAULT_MODELS_DIR, "请输入模型缓存目录", args.no_prompt)  # 获取模型目录。
+        output_dir.mkdir(parents=True, exist_ok=True)  # 确保输出目录存在。
+        models_dir.mkdir(parents=True, exist_ok=True)  # 确保模型目录存在。
+        if args.tee_log:  # 若指定日志文件。
+            tee_path = Path(args.tee_log).expanduser().resolve()  # 解析日志路径。
+            tee_stream = TeeStream(sys.stdout, tee_path)  # 创建 tee 流。
+            sys.stdout = tee_stream  # 将标准输出指向 tee。
+        print("=== Whisper large-v2 中文转写自动流程 ===")  # 输出标题。
+        print_token_hint()  # 输出 token 状态。
+        if args.download:  # 若需要提前下载模型。
+            invoke_downloader(models_dir, args.hf_token or os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HF_TOKEN"))  # 调用下载脚本。
+        audio_files = discover_audio_files(input_path)  # 扫描音频文件。
+        if not audio_files:  # 若列表为空。
+            print("⚠️ 未在输入路径下找到音频文件。支持扩展: " + ", ".join(sorted(AUDIO_EXTENSIONS)))  # 提示用户。
+            return 0  # 不算错误。
+        for index, audio_path in enumerate(audio_files, start=1):  # 逐个处理文件。
+            print(f"\n[{index}/{len(audio_files)}] 处理: {audio_path}")  # 打印当前进度。
+            command = build_cli_command(audio_path, output_dir, models_dir, args)  # 构建命令。
+            exit_code = run_subprocess(command)  # 执行命令。
+            if exit_code != 0:  # 若执行失败。
+                raise RuntimeError(f"转写失败: {audio_path}")  # 抛出异常中断。
+        print("\n✅ 所有文件转写完成。输出位于: " + str(output_dir))  # 输出完成提示。
+        print("   - *.segments.json（段级时间轴）")  # 提醒段级文件。
+        print("   - *.words.json    （词级时间轴）")  # 提醒词级文件。
+        return 0  # 正常退出。
+    except Exception as exc:  # noqa: BLE001
+        print(f"❌ 运行失败: {exc}")  # 打印错误信息。
+        return 1  # 返回错误码。
+    finally:
+        if tee_stream:  # 若创建了 tee 流。
+            tee_stream.flush()  # 刷新残留内容。
+            tee_stream.close()  # 关闭日志文件。
+            sys.stdout = tee_stream._stream  # type: ignore[attr-defined]  # 恢复原始 stdout。
+
+
+if __name__ == "__main__":  # 当脚本直接运行时。
+    sys.exit(main())  # 以主函数结果作为退出码。
