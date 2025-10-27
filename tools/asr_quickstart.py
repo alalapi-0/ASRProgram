@@ -16,10 +16,10 @@ except Exception:  # noqa: BLE001
     pass  # 某些运行时不支持 reconfigure，此时忽略即可。
 
 AUDIO_EXTENSIONS = {".wav", ".flac", ".m4a", ".mp3", ".aac", ".ogg"}  # 允许处理的音频扩展名集合。
-DEFAULT_INPUT = Path("./Audio").resolve()  # 默认输入目录。
-DEFAULT_OUTPUT = Path("./out").resolve()  # 默认输出目录。
-DEFAULT_MODELS_DIR = Path(os.path.expanduser("~/.cache/asrprogram/models")).resolve()  # 默认模型缓存路径。
 SCRIPT_ROOT = Path(__file__).resolve().parent.parent  # 推导项目根目录以便定位脚本。
+DEFAULT_INPUT = (SCRIPT_ROOT / "Audio").resolve()  # 默认输入目录。
+DEFAULT_OUTPUT = (SCRIPT_ROOT / "out").resolve()  # 默认输出目录。
+DEFAULT_MODELS_DIR = Path(os.path.expanduser("~/.cache/asrprogram/models")).resolve()  # 默认模型缓存路径。
 DOWNLOAD_SCRIPT = SCRIPT_ROOT / "scripts" / "download_model.py"  # 下载脚本路径。
 
 
