@@ -138,6 +138,38 @@ logging:
   trace_id: auto  # 自动生成 TraceID
 ```
 
+<!-- Purpose: Introduce remote monitoring section -->
+## 🌐 远程实时监控与日志 / Remote Live Monitoring
+<!-- Purpose: Describe SSH usage -->
+1. **SSH 直连实时查看 / Live over SSH**
+   ```bash
+   ssh -t ubuntu@<IP> 'cd /home/ubuntu/asr_program && PYTHONUNBUFFERED=1 python3 -u -m src.cli.main ... --tee-log out/run_$(date +%F_%H%M%S).log'
+   ```
+   上述命令结合 `PYTHONUNBUFFERED=1` 与 `--tee-log`，在交互终端实时刷出日志的同时，将内容追加到带时间戳的文件中。
+
+<!-- Purpose: Describe tmux usage -->
+2. **后台运行（tmux） / Background with tmux**
+   ```bash
+   tmux new -s asr -d 'cd /home/ubuntu/asr_program && PYTHONUNBUFFERED=1 python3 -u -m src.cli.main ... --tee-log out/run.log'
+   tmux attach -t asr
+   ```
+   通过 `tmux` 将任务留在远端后台运行，重连会话即可继续查看实时输出。
+
+<!-- Purpose: Describe systemd usage -->
+3. **systemd 服务示例 / systemd Unit Example**
+   ```ini
+   [Service]
+   WorkingDirectory=/home/ubuntu/asr_program
+   ExecStart=/usr/bin/python3 -u -m src.cli.main ... --tee-log /var/log/asr/run.log
+   Environment=PYTHONUNBUFFERED=1
+   StandardOutput=journal+console
+   StandardError=journal+console
+   ```
+   将服务 stdout/stderr 同时写入控制台与 systemd journal，配合 `--tee-log` 便于集中收集历史日志。
+
+<!-- Purpose: Explain CLI switches -->
+`--tee-log <FILE>` 会将所有日志同时写入控制台与指定文件；`--force-flush` 强制每条日志即时刷新到终端和磁盘，适合 tail/SSH 监控；`--no-progress` 可在脚本化环境完全关闭进度条。若未显式关闭进度条，程序会在非 TTY 环境（如重定向或 systemd）自动禁用动画，仅输出结构化进度日志，避免噪音。
+
 <!-- Purpose: Introduce testing section -->
 ## 🧪 测试与验证 / Testing & Verification
 <!-- Purpose: Provide commands for tests -->

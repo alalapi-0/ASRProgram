@@ -2,7 +2,9 @@
 from __future__ import annotations  # 启用延迟求值的注解语义以支持联合类型语法。
 import json  # 导入 json 以在 JSONL 格式下序列化日志记录。
 import logging  # 导入 logging 以兼容旧接口并处理回退输出。
+import os
 import sys  # 导入 sys 以访问标准输出流对象。
+import traceback
 import uuid  # 导入 uuid 以生成高熵的 TraceID。
 from datetime import datetime, timezone  # 导入 datetime 以生成 UTC 时间戳。
 from pathlib import Path  # 导入 Path 便于处理日志文件路径。
@@ -37,7 +39,7 @@ def _normalize_level(level: str) -> str:
     return upper  # 返回规范化后的等级字符串。
 
 
-def _append_text_atomic(path: Path, text: str) -> None:
+def _append_text_atomic(path: Path, text: str, *, force_flush: bool = False) -> None:
     """以锁保护的方式向纯文本日志追加一行，避免并发写入冲突。"""  # 函数说明。
     safe_mkdirs(path.parent)  # 确保日志目录存在。
     lock_path = path.with_suffix(path.suffix + ".lock")  # 为该文件生成锁文件路径。
@@ -45,6 +47,12 @@ def _append_text_atomic(path: Path, text: str) -> None:
         with path.open("a", encoding="utf-8") as handle:  # 以追加模式打开日志文件。
             handle.write(text)  # 写入日志文本内容。
             handle.write("\n")  # 追加换行保持一行一条日志。
+            handle.flush()  # 确保刷新到内核缓冲区。
+            if force_flush:
+                try:
+                    os.fsync(handle.fileno())
+                except OSError:  # noqa: PERF203
+                    pass
 
 
 class _LoggerCore:
@@ -57,6 +65,8 @@ class _LoggerCore:
         log_file: str | None,
         sample_rate: float,
         quiet: bool,
+        *,
+        force_flush: bool = False,
     ) -> None:
         """初始化日志核心，保存格式、等级与输出目标。"""  # 方法说明。
         normalized = log_format.lower()  # 统一格式字符串大小写。
@@ -69,6 +79,7 @@ class _LoggerCore:
         self.quiet = quiet  # 保存静默模式标志。
         self._sample_counter = 0  # 初始化采样计数器，用于确定是否输出。
         self._console = sys.stdout  # 保存标准输出流句柄。
+        self._force_flush = force_flush
         if self.log_file is not None:  # 若需要写入文件则确保目录存在。
             safe_mkdirs(self.log_file.parent)  # 调用工具函数创建目录。
 
@@ -126,7 +137,7 @@ class _LoggerCore:
                 self._console.write(rendered + "\n")  # 写入文本并换行。
                 self._console.flush()  # 立即刷新输出。
             if self.log_file is not None:  # 若指定了日志文件则同步写入。
-                _append_text_atomic(self.log_file, rendered)  # 使用锁保护的方式追加文本。
+                _append_text_atomic(self.log_file, rendered, force_flush=self._force_flush)  # 使用锁保护的方式追加文本。
         else:  # JSONL 模式下直接写入结构化数据。
             payload = self._render_json(record)  # 获取 JSONL 结构。
             if not self.quiet:  # 控制台输出 JSON 字符串。
@@ -134,7 +145,7 @@ class _LoggerCore:
                 self._console.write("\n")  # 输出换行符。
                 self._console.flush()  # 刷新标准输出。
             if self.log_file is not None:  # 若配置了文件则使用 jsonl_append 追加。
-                jsonl_append(str(self.log_file), payload)  # 追加到 JSONL 文件。
+                jsonl_append(str(self.log_file), payload, force_flush=self._force_flush)  # 追加到 JSONL 文件。
 
     def human(self, record: Dict[str, Any]) -> str:
         """公开人类可读渲染方法，便于测试或复用。"""  # 方法说明。
@@ -188,9 +199,25 @@ class StructuredLogger:
         """输出 ERROR 级日志。"""  # 方法说明。
         self.log("ERROR", message, **fields)  # 调用通用 log 方法。
 
-    def exception(self, message: str, **fields: Any) -> None:
-        """输出包含异常信息的 ERROR 级日志。"""  # 方法说明。
-        self.error(message, **fields)  # 当前实现与 error 相同，保持兼容。
+    def exception(self, message: str, exc: BaseException | None = None, **fields: Any) -> None:
+        """输出包含异常堆栈的 ERROR 级日志。"""  # 方法说明。
+        exception_obj = exc
+        if exception_obj is None:
+            _, exception_obj, _ = sys.exc_info()
+        if exception_obj is not None:
+            fields.setdefault("error", str(exception_obj))
+            fields.setdefault("error_type", exception_obj.__class__.__name__)
+            trace_text = "".join(
+                traceback.format_exception(
+                    exception_obj.__class__, exception_obj, exception_obj.__traceback__
+                )
+            )
+            fields.setdefault("trace", trace_text)
+        else:
+            trace_text = traceback.format_exc()
+            if trace_text.strip():
+                fields.setdefault("trace", trace_text)
+        self.log("ERROR", message, **fields)
 
     def human(self, record: Dict[str, Any]) -> str:
         """委托核心生成 human 格式字符串。"""  # 方法说明。
@@ -207,9 +234,20 @@ def get_logger(
     log_file: str | None = None,
     sample_rate: float = 1.0,
     quiet: bool = False,
+    *,
+    force_flush: bool = False,
+    file_path: str | None = None,
 ) -> StructuredLogger:
     """创建并返回结构化日志器，支持 human/jsonl 两种模式。"""  # 函数说明。
-    core = _LoggerCore(format, level, log_file, sample_rate, quiet)  # 初始化核心组件。
+    target_file = file_path or log_file
+    core = _LoggerCore(
+        format,
+        level,
+        target_file,
+        sample_rate,
+        quiet,
+        force_flush=force_flush,
+    )  # 初始化核心组件。
     return StructuredLogger(core)  # 返回不带额外上下文的基础日志器。
 
 
@@ -221,17 +259,33 @@ def bind_context(logger: StructuredLogger, **kwargs: Any) -> StructuredLogger:
 class ProgressPrinter:
     """封装 tqdm 或退化日志方式的进度展示工具。"""  # 类说明。
 
-    def __init__(self, total: int, description: str, enabled: bool, logger: StructuredLogger | None = None) -> None:
+    def __init__(
+        self,
+        total: int,
+        description: str,
+        enabled: bool,
+        logger: StructuredLogger | None = None,
+        *,
+        disable_animation: bool | None = None,
+        is_tty: bool | None = None,
+    ) -> None:
         """初始化进度打印器，可配置是否启用以及输出目标。"""  # 方法说明。
+        tty_status = is_tty
+        if tty_status is None:
+            try:
+                tty_status = sys.stdout.isatty()
+            except Exception:  # noqa: BLE001
+                tty_status = False
+        disable_flag = disable_animation if disable_animation is not None else not bool(tty_status)
         self.enabled = enabled and total > 0  # 仅当启用且总数大于零时才真正显示进度。
         self.description = description  # 保存描述文本。
         self.total = total  # 保存任务总数。
         self.count = 0  # 初始化当前完成数量。
         self.logger = logger  # 保存可选的结构化日志器。
-        if self.enabled and tqdm is not None:  # 若 tqdm 可用则构建进度条实例。
-            self._bar = tqdm(total=total, desc=description, leave=False)  # 创建 tqdm 进度条。
-        else:
-            self._bar = None  # 不启用进度条时将引用置为 None。
+        self._bar = None
+        if self.enabled and tqdm is not None and not disable_flag:  # 若 tqdm 可用则构建进度条实例。
+            self._bar = tqdm(total=total, desc=description, leave=False, disable=False)  # 创建 tqdm 进度条。
+        self._disable_animation = disable_flag
 
     def update(self, message: str | None = None) -> None:
         """递增进度计数并可选输出附加消息。"""  # 方法说明。
@@ -241,6 +295,7 @@ class ProgressPrinter:
             self._bar.update(1)  # 累加一个单位。
             if message:  # 若提供附加消息则更新 postfix。
                 self._bar.set_postfix_str(message, refresh=False)  # 使用 postfix 展示附加信息。
+            self._bar.refresh()
             return  # tqdm 模式下不再额外记录日志。
         self.count += 1  # 手动模式下递增计数。
         percent = (self.count / self.total) * 100 if self.total else 0.0  # 计算完成百分比。
@@ -304,11 +359,11 @@ class TaskLogger:
 
     def failure(self, path: str, attempts: int, exc: Exception) -> None:
         """记录任务失败事件，包含错误详情。"""  # 方法说明。
-        self.logger.error(
+        self.logger.exception(
             "task failed",
+            exc=exc,
             task_path=path,
             attempts=attempts,
-            error=str(exc),
         )
 
     def skipped(self, path: str, reason: str) -> None:

@@ -6,6 +6,7 @@ import errno
 import json
 # 导入 os 以检查目录权限等。 
 import os
+import sys
 # 导入 time 以测量耗时与控制重试。 
 import time
 # 导入 traceback 以在错误文件中写入堆栈信息。 
@@ -666,6 +667,7 @@ def run(
     rate_limit: float | object = _UNSET,
     skip_done: bool | object = _UNSET,
     fail_fast: bool | object = _UNSET,
+    force_flush: bool | object = _UNSET,
     integrity_check: bool | object = _UNSET,
     lock_timeout: float | object = _UNSET,
     cleanup_temp: bool | object = _UNSET,
@@ -712,6 +714,7 @@ def run(
         "rate_limit": rate_limit,
         "skip_done": skip_done,
         "fail_fast": fail_fast,
+        "force_flush": force_flush,
         "integrity_check": integrity_check,
         "lock_timeout": lock_timeout,
         "cleanup_temp": cleanup_temp,
@@ -736,6 +739,7 @@ def run(
         "rate_limit": 0.0,
         "skip_done": True,
         "fail_fast": False,
+        "force_flush": False,
         "integrity_check": True,
         "lock_timeout": 30.0,
         "cleanup_temp": True,
@@ -836,6 +840,7 @@ def run(
     manifest_path_value = cfg.get("manifest_path")  # 清单路径。
     manifest_path = str(manifest_path_value) if manifest_path_value else None  # 归一化为字符串或 None。
     force = bool(cfg.get("force"))  # 强制重跑开关。
+    force_flush_flag = bool(cfg.get("force_flush"))  # 是否强制立即刷新日志。
     profiling_enabled = bool(profiling_cfg.get("enabled"))  # Profiling 开关最终值。
     profile = profiling_enabled  # 重用原变量以兼容后续逻辑。
     active_profile = cfg.get("meta", {}).get("profile")  # 记录生效的 profile 名称。
@@ -849,6 +854,7 @@ def run(
         log_file=log_file,
         sample_rate=log_sample_rate,
         quiet=quiet,
+        force_flush=force_flush_flag,
     )
     trace_id = new_trace_id()  # 为本次运行生成 TraceID。
     run_logger = bind_context(base_logger, trace_id=trace_id)  # 绑定 TraceID 形成运行级日志器。
@@ -1028,10 +1034,22 @@ def run(
             },
         }
         return _finalize(summary)
-    progress_allowed = progress and not quiet  # 仅在允许进度且静默时启用。
+    try:
+        stdout_is_tty = sys.stdout.isatty()
+    except Exception:  # noqa: BLE001
+        stdout_is_tty = False
+    progress_requested = progress and not quiet  # 仅在允许进度且非静默时启用。
+    progress_animation_allowed = progress_requested and stdout_is_tty
     if log_format.lower() == "jsonl" and quiet:
-        progress_allowed = False  # 在 JSONL+静默模式下关闭进度动画以避免干扰。
-    progress = ProgressPrinter(len(tasks), "processing", enabled=progress_allowed, logger=run_logger)
+        progress_animation_allowed = False  # 在 JSONL+静默模式下关闭进度动画以避免干扰。
+    progress = ProgressPrinter(
+        len(tasks),
+        "processing",
+        enabled=progress_requested,
+        logger=run_logger,
+        disable_animation=not progress_animation_allowed,
+        is_tty=stdout_is_tty,
+    )
     context = TaskContext(
         backend=backend,
         backend_name=backend_name,

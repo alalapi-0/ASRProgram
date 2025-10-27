@@ -210,19 +210,25 @@ def with_file_lock(lock_path: str | os.PathLike[str], timeout_sec: float) -> Ite
             path.unlink(missing_ok=True)
 
 # 定义追加 JSON 行到 JSONL 文件的函数。 
-def jsonl_append(path: str | os.PathLike[str], record: dict) -> None:
+def jsonl_append(path: str | os.PathLike[str], record: dict, *, force_flush: bool = False) -> None:
     """以原子方式向 JSONL 文件追加一行记录。"""  # 函数说明。
-    # 将路径转换为 Path 对象并确保父目录存在。 
+    # 将路径转换为 Path 对象并确保父目录存在。
     target = Path(path)
     safe_mkdirs(target.parent)
-    # 为 JSONL 文件单独创建锁文件避免并发写入。 
+    # 为 JSONL 文件单独创建锁文件避免并发写入。
     lock_path = target.with_suffix(target.suffix + ".lock")
-    # 在锁的保护下执行打开与追加。 
+    # 在锁的保护下执行打开与追加。
     with with_file_lock(lock_path, timeout_sec=30):
-        # 以追加模式打开文件并写入 JSON 序列化后的记录。 
+        # 以追加模式打开文件并写入 JSON 序列化后的记录。
         with target.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False))
             handle.write("\n")
+            handle.flush()
+            if force_flush:
+                try:
+                    os.fsync(handle.fileno())
+                except OSError:  # noqa: PERF203
+                    pass
 
 # 定义去除扩展名的辅助函数。 
 def path_sans_ext(path: str | os.PathLike[str]) -> str:
