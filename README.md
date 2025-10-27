@@ -76,6 +76,56 @@ python -m src.cli.main \
 - <!-- Purpose: Segment JSON explanation -->`out/*.segments.json`：段级转写（可选）。
 - <!-- Purpose: Manifest explanation -->`out/_manifest.jsonl`：处理记录、哈希与性能信息。
 
+<!-- Purpose: Introduce dedicated large-v2 workflow section -->
+## 🎯 Whisper large-v2 中文零交互流程
+<!-- Purpose: Provide concise summary bullets -->
+- 模型固定为 `faster-whisper/large-v2`，语言固定中文（`zh`），默认输出段级与词级时间轴。
+- 使用 Hugging Face Hub 自动断点续传下载，缓存目录默认为 `~/.cache/asrprogram/models/faster-whisper/large-v2`。
+- 新增 `tools/asr_quickstart.py` 提供零交互主入口，搭配 `--no-prompt` 可一键执行。
+- 支持 `--tee-log` 双通道日志，远程终端亦可实时查看输出。
+
+<!-- Purpose: Document one-click scripts -->
+### 🔘 一键运行脚本
+- **Ubuntu / macOS / WSL**
+  ```bash
+  chmod +x scripts/auto_transcribe.sh
+  ./scripts/auto_transcribe.sh
+  ```
+- **Windows**
+  ```bat
+  scripts\auto_transcribe.bat
+  ```
+
+运行脚本后，将自动：检查 `ffmpeg`、下载模型（如缺失）、遍历 `./Audio` 目录下的音频文件并顺序生成 JSON 结果。
+
+<!-- Purpose: Describe output artifacts -->
+### 📦 输出文件
+- `out/<filename>.segments.json`：段级时间轴（包含平均置信度、词列表）。
+- `out/<filename>.words.json`：词级时间轴（包含起止时间、置信度、段编号）。
+
+<!-- Purpose: Mention cache location -->
+### 📁 模型缓存目录
+默认缓存路径为：`~/.cache/asrprogram/models/faster-whisper/large-v2`。可通过 `--models-dir` 覆写（Linux/macOS 使用 `~/path`，Windows 支持 `%USERPROFILE%\path`）。
+
+<!-- Purpose: Document token guidance -->
+### 🔐 Hugging Face Token（401/403 解决）
+1. 前往 [https://huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) 创建 **Read** 权限的 Token。
+2. **Linux / macOS** 永久配置：
+   ```bash
+   echo 'export HF_TOKEN="hf_xxx"' >> ~/.bashrc
+   echo 'export HUGGINGFACE_HUB_TOKEN="hf_xxx"' >> ~/.bashrc
+   source ~/.bashrc
+   ```
+3. **Windows** 永久配置：
+   ```powershell
+   setx HF_TOKEN "hf_xxx"
+   setx HUGGINGFACE_HUB_TOKEN "hf_xxx"
+   ```
+4. 或使用 CLI 登录缓存：
+   ```bash
+   huggingface-cli login --token hf_xxx
+   ```
+
 <!-- Purpose: Provide python API sample heading -->
 ### 5. Python API 示例 / Python API Usage
 <!-- Purpose: Show how to use library programmatically -->
@@ -143,14 +193,14 @@ logging:
 <!-- Purpose: Describe SSH usage -->
 1. **SSH 直连实时查看 / Live over SSH**
    ```bash
-   ssh -t ubuntu@<IP> 'cd /home/ubuntu/asr_program && PYTHONUNBUFFERED=1 python3 -u -m src.cli.main ... --tee-log out/run_$(date +%F_%H%M%S).log'
+   ssh -t ubuntu@<IP> 'cd /home/ubuntu/asr_program && PYTHONUNBUFFERED=1 python3 -u tools/asr_quickstart.py --no-prompt --download --tee-log out/run_$(date +%F_%H%M%S).log'
    ```
    上述命令结合 `PYTHONUNBUFFERED=1` 与 `--tee-log`，在交互终端实时刷出日志的同时，将内容追加到带时间戳的文件中。
 
 <!-- Purpose: Describe tmux usage -->
 2. **后台运行（tmux） / Background with tmux**
    ```bash
-   tmux new -s asr -d 'cd /home/ubuntu/asr_program && PYTHONUNBUFFERED=1 python3 -u -m src.cli.main ... --tee-log out/run.log'
+   tmux new -s asr -d 'cd /home/ubuntu/asr_program && PYTHONUNBUFFERED=1 python3 -u tools/asr_quickstart.py --no-prompt --download --tee-log out/run.log'
    tmux attach -t asr
    ```
    通过 `tmux` 将任务留在远端后台运行，重连会话即可继续查看实时输出。

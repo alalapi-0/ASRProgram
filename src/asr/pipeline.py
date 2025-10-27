@@ -245,7 +245,7 @@ def _load_existing_audio_info(words_path: Path) -> Tuple[str | None, float | Non
     """尝试读取已有 words.json 的音频哈希与时长。"""  # 函数说明。
     if not words_path.exists():
         return None, None
-    try:
+    try:  # 捕获内部实现抛出的异常。
         with words_path.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
     except Exception:  # noqa: BLE001
@@ -634,7 +634,7 @@ def _process_one(task: PipelineTask, context: TaskContext) -> TaskResult:
 
 
 # 定义主运行函数，协调扫描、并发执行与 Manifest。 
-def run(
+def _run_impl(
     config: dict | None = None,
     *,
     input_path: str | None = None,
@@ -653,6 +653,7 @@ def run(
     metrics_file: str | object = _UNSET,
     profile: bool | object = _UNSET,
     progress: bool | object = _UNSET,
+    disable_progress: bool | object = _UNSET,  # CLI 禁用进度条标志。
     model: str | object = _UNSET,
     compute_type: str | object = _UNSET,
     device: str | object = _UNSET,
@@ -709,6 +710,7 @@ def run(
         "quiet": quiet,
         "metrics_file": metrics_file,
         "progress": progress,
+        "disable_progress": disable_progress,  # CLI 禁用进度条标志覆盖值。
         "num_workers": num_workers,
         "max_retries": max_retries,
         "rate_limit": rate_limit,
@@ -734,6 +736,7 @@ def run(
         "quiet": False,
         "metrics_file": None,
         "progress": True,
+        "disable_progress": False,  # 默认允许进度条。
         "num_workers": 1,
         "max_retries": 1,
         "rate_limit": 0.0,
@@ -1038,7 +1041,8 @@ def run(
         stdout_is_tty = sys.stdout.isatty()
     except Exception:  # noqa: BLE001
         stdout_is_tty = False
-    progress_requested = progress and not quiet  # 仅在允许进度且非静默时启用。
+    disable_progress_flag = bool(cfg.get("disable_progress", False))  # 读取禁用进度标记。
+    progress_requested = progress and not quiet and not disable_progress_flag  # 仅在允许进度且未禁用时启用。
     progress_animation_allowed = progress_requested and stdout_is_tty
     if log_format.lower() == "jsonl" and quiet:
         progress_animation_allowed = False  # 在 JSONL+静默模式下关闭进度动画以避免干扰。
@@ -1118,6 +1122,10 @@ def run(
                 )
             elif item.status == "skipped":
                 skipped_count += 1
+            try:
+                sys.stdout.flush()  # 每处理完一个任务刷新 stdout，确保远程终端即时显示。
+            except Exception:  # noqa: BLE001
+                pass  # 某些环境可能不支持 flush，安全忽略。
                 reason = item.skipped_reason or "skipped"
                 if item.stale:
                     skipped_stale += 1
@@ -1175,3 +1183,96 @@ def run(
         },
     }
     return _finalize(summary)
+
+def run(
+    config: dict | None = None,  # 外部配置字典。
+    *,
+    input_path: str | None = None,  # CLI 覆盖的输入路径。
+    out_dir: str | None = None,  # CLI 覆盖的输出目录。
+    backend_name: str | None = None,  # CLI 覆盖的后端名称。
+    language: str | object = _UNSET,  # CLI 覆盖的语言。
+    segments_json: bool | object = _UNSET,  # CLI 覆盖的段级 JSON 选项。
+    overwrite: bool | object = _UNSET,  # CLI 覆盖的覆盖策略。
+    dry_run: bool | object = _UNSET,  # CLI 覆盖的干跑选项。
+    verbose: bool | object = _UNSET,  # CLI 覆盖的详细日志开关。
+    log_format: str | object = _UNSET,  # CLI 覆盖的日志格式。
+    log_level: str | object = _UNSET,  # CLI 覆盖的日志等级。
+    log_file: str | object = _UNSET,  # CLI 覆盖的日志文件。
+    log_sample_rate: float | object = _UNSET,  # CLI 覆盖的日志采样率。
+    quiet: bool | object = _UNSET,  # CLI 覆盖的静默模式。
+    metrics_file: str | object = _UNSET,  # CLI 覆盖的指标文件。
+    profile: bool | object = _UNSET,  # CLI 覆盖的性能分析开关。
+    progress: bool | object = _UNSET,  # CLI 覆盖的进度开关。
+    disable_progress: bool | object = _UNSET,  # CLI 覆盖的禁用进度标志。
+    model: str | object = _UNSET,  # CLI 覆盖的模型路径。
+    compute_type: str | object = _UNSET,  # CLI 覆盖的计算精度。
+    device: str | object = _UNSET,  # CLI 覆盖的设备参数。
+    beam_size: int | object = _UNSET,  # CLI 覆盖的 beam_size。
+    temperature: float | object = _UNSET,  # CLI 覆盖的温度参数。
+    vad_filter: bool | object = _UNSET,  # CLI 覆盖的 VAD 选项。
+    chunk_length_s: float | object = _UNSET,  # CLI 覆盖的切块长度。
+    best_of: int | object = _UNSET,  # CLI 覆盖的 best_of。
+    patience: float | object = _UNSET,  # CLI 覆盖的 patience。
+    num_workers: int | object = _UNSET,  # CLI 覆盖的 worker 数量。
+    max_retries: int | object = _UNSET,  # CLI 覆盖的重试次数。
+    rate_limit: float | object = _UNSET,  # CLI 覆盖的速率限制。
+    skip_done: bool | object = _UNSET,  # CLI 覆盖的跳过已完成选项。
+    fail_fast: bool | object = _UNSET,  # CLI 覆盖的快速失败选项。
+    force_flush: bool | object = _UNSET,  # CLI 覆盖的强制刷新选项。
+    integrity_check: bool | object = _UNSET,  # CLI 覆盖的完整性校验。
+    lock_timeout: float | object = _UNSET,  # CLI 覆盖的锁超时。
+    cleanup_temp: bool | object = _UNSET,  # CLI 覆盖的临时文件清理。
+    manifest_path: str | object = _UNSET,  # CLI 覆盖的 Manifest 路径。
+    force: bool | object = _UNSET,  # CLI 覆盖的强制重跑。
+    logger: StructuredLogger | None = None,  # 可选的结构化日志器。
+    **legacy_kwargs,  # 接收兼容的旧参数。
+) -> dict:
+    """包装 _run_impl，捕获异常后记录日志并退出。"""  # 函数说明。
+
+    try:
+        return _run_impl(  # 委托内部实现并返回结果。
+            config=config,  # 传递配置对象。
+            input_path=input_path,  # 指定输入路径覆盖值。
+            out_dir=out_dir,  # 指定输出目录覆盖值。
+            backend_name=backend_name,  # 指定后端名称覆盖值。
+            language=language,  # 指定语言参数覆盖值。
+            segments_json=segments_json,  # 指定段级 JSON 标志。
+            overwrite=overwrite,  # 指定覆盖行为。
+            dry_run=dry_run,  # 指定是否只做干跑。
+            verbose=verbose,  # 指定详细日志开关。
+            log_format=log_format,  # 指定日志格式。
+            log_level=log_level,  # 指定日志等级。
+            log_file=log_file,  # 指定日志文件路径。
+            log_sample_rate=log_sample_rate,  # 指定日志采样率。
+            quiet=quiet,  # 指定静默模式开关。
+            metrics_file=metrics_file,  # 指定指标输出路径。
+            profile=profile,  # 指定性能分析开关。
+            progress=progress,  # 指定进度开关。
+            disable_progress=disable_progress,  # 指定禁用进度条标志。
+            model=model,  # 指定模型路径覆盖值。
+            compute_type=compute_type,  # 指定精度类型。
+            device=device,  # 指定设备。
+            beam_size=beam_size,  # 指定 beam_size 覆盖值。
+            temperature=temperature,  # 指定解码温度。
+            vad_filter=vad_filter,  # 指定 VAD 过滤开关。
+            chunk_length_s=chunk_length_s,  # 指定切块长度。
+            best_of=best_of,  # 指定 best_of 覆盖值。
+            patience=patience,  # 指定 patience 覆盖值。
+            num_workers=num_workers,  # 指定并发 worker 数。
+            max_retries=max_retries,  # 指定最大重试次数。
+            rate_limit=rate_limit,  # 指定速率限制。
+            skip_done=skip_done,  # 指定跳过已完成。
+            fail_fast=fail_fast,  # 指定快速失败。
+            force_flush=force_flush,  # 指定强制刷新。
+            integrity_check=integrity_check,  # 指定完整性校验开关。
+            lock_timeout=lock_timeout,  # 指定锁超时时间。
+            cleanup_temp=cleanup_temp,  # 指定清理临时文件开关。
+            manifest_path=manifest_path,  # 指定 Manifest 覆盖值。
+            force=force,  # 指定强制重跑标志。
+            logger=logger,  # 传递现有结构化日志器。
+            **legacy_kwargs,  # 传递其余兼容参数。
+        )
+    except Exception as exc:  # noqa: BLE001
+        target_logger = logger or get_logger()  # 若外部未提供结构化日志器则创建默认实例。
+        target_logger.exception("pipeline execution failed", exc=exc)  # 记录异常堆栈。
+        sys.exit(1)  # 以状态码 1 退出进程。

@@ -279,32 +279,38 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = build_parser()  # 构建解析器。
     args = parser.parse_args(argv)  # 解析命令行参数。
-    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
-    tee_path: Path | None = None
-    if args.tee_log:
-        tee_path = Path(args.tee_log)
-        tee_path.parent.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(tee_path, mode="a", encoding="utf-8"))
-    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
-    for handler in handlers:
-        handler.setFormatter(formatter)
-        if args.force_flush:
-            original_flush = handler.flush
+    tee_path: Path | None = None  # 初始化 tee 日志路径变量。
+    stream_handler = logging.StreamHandler(sys.stdout)  # 创建输出到 stdout 的处理器。
+    file_handler: logging.Handler
+    if args.tee_log:  # 若指定 tee 日志文件。
+        tee_path = Path(args.tee_log).expanduser().resolve()  # 解析 tee 日志路径并展开用户目录。
+        tee_path.parent.mkdir(parents=True, exist_ok=True)  # 确保父目录存在。
+        file_handler = logging.FileHandler(tee_path, mode="a", encoding="utf-8")  # 创建文件处理器。
+    else:
+        file_handler = logging.NullHandler()  # 未指定时使用空处理器占位。
+    logging.basicConfig(
+        level=logging.INFO,  # 设置默认日志级别。
+        handlers=[stream_handler, file_handler],  # 同时附加控制台与文件处理器。
+        format="%(asctime)s | %(levelname)s | %(message)s",  # 统一日志格式。
+        force=True,  # 强制重置已有配置以避免重复处理器。
+    )
+    if args.force_flush:  # 若要求强制刷新。
+        for handler in logging.getLogger().handlers:  # 遍历根日志器处理器。
+            original_flush = handler.flush  # 保存原始 flush 方法。
 
-            def _flush(h: logging.Handler = handler, func=original_flush) -> None:
+            def _flush(h: logging.Handler = handler, func=original_flush) -> None:  # type: ignore[misc]
                 try:
-                    func()
+                    func()  # 调用原始 flush。
                 finally:
-                    stream = getattr(h, "stream", None)
-                    if stream is not None:
+                    stream = getattr(h, "stream", None)  # 访问底层流对象。
+                    if stream is not None:  # 若存在流。
                         try:
-                            stream.flush()
+                            stream.flush()  # 主动刷新底层流。
                         except Exception:  # noqa: BLE001
-                            pass
+                            pass  # 忽略刷新失败。
 
-            handler.flush = _flush  # type: ignore[assignment]
-    logging.basicConfig(level=logging.INFO, handlers=handlers, force=True)
-    cli_logger = logging.getLogger("src.cli.main")
+            handler.flush = _flush  # type: ignore[assignment]  # 覆盖 flush 方法以附加刷新逻辑。
+    cli_logger = logging.getLogger("src.cli.main")  # 获取 CLI 模块日志器。
     if args.backend is not None and args.backend not in ALLOWED_BACKENDS:  # 若用户提供了非法后端。
         parser.error(
             f"Unsupported backend '{args.backend}'. Choose from: {', '.join(sorted(ALLOWED_BACKENDS))}"
@@ -338,6 +344,11 @@ def main(argv: list[str] | None = None) -> int:
         quiet=bool(config.get("quiet", False)),
         force_flush=force_flush,
     )
+    try:
+        stdout_is_tty = sys.stdout.isatty()  # 检测终端是否支持 TTY。
+    except Exception:  # noqa: BLE001
+        stdout_is_tty = False  # 回退为非 TTY。
+    disable_tqdm = bool(args.no_progress or not stdout_is_tty)  # 根据参数与 TTY 状态决定是否禁用进度条。
     if config.get("verbose"):  # 在 verbose 模式下打印关键配置。
         runtime_cfg = config.get("runtime", {})
         logger.debug(
@@ -353,11 +364,11 @@ def main(argv: list[str] | None = None) -> int:
         manifest_path = str(Path(config["out_dir"]) / "_manifest.jsonl")
     config["manifest_path"] = manifest_path  # 将推导结果写入配置传递给管线。
     try:
-        run(config=config, logger=logger)  # 调用管线执行核心流程。
+        run(config=config, logger=logger, disable_progress=disable_tqdm)  # 调用管线执行核心流程。
         return 0  # 正常运行即返回 0。
     except Exception:  # noqa: BLE001
-        logger.exception("fatal pipeline error")
-        return 1  # 非零退出表示失败。
+        logger.exception("Uncaught error")  # 记录未捕获异常。
+        return 1  # 返回 1，__main__ 中的 sys.exit 将退出进程。
 
 
 if __name__ == "__main__":  # 允许脚本直接运行。
