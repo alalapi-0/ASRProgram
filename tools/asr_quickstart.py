@@ -54,7 +54,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-dir", default=None, help="输出目录，默认 ./out")  # 输出目录参数。
     parser.add_argument("--models-dir", default=None, help="模型缓存目录，默认 ~/.cache/asrprogram/models")  # 模型目录。
     parser.add_argument("--download", action="store_true", help="启动前自动检查并下载模型")  # 是否下载模型。
-    parser.add_argument("--no-prompt", action="store_true", help="禁用所有交互式提问，全自动运行")  # 无交互标记。
+    parser.add_argument(
+        "--no-prompt",
+        action="store_true",
+        default=True,
+        help="禁用所有交互式提问，全自动运行 (默认启用)",
+    )  # 无交互标记，默认关闭交互。
+    parser.add_argument(
+        "--prompt",
+        dest="no_prompt",
+        action="store_false",
+        help="启用交互式提问以覆盖默认路径",
+    )  # 可选启用交互输入。
     parser.add_argument("--tee-log", default=None, help="将标准输出同时写入指定日志文件")  # tee 日志路径。
     parser.add_argument("--num-workers", type=int, default=1, help="传递给主 CLI 的并发 worker 数")  # worker 数量。
     parser.add_argument("--device", default=None, help="可选设备参数传递给主 CLI")  # 设备设置。
@@ -151,6 +162,19 @@ def invoke_downloader(models_dir: Path, token: Optional[str]) -> None:
         raise RuntimeError("模型下载失败，请检查日志后重试。")  # 抛出异常终止流程。
 
 
+def ensure_model_cache(models_dir: Path, args: argparse.Namespace) -> Path:
+    """确保 faster-whisper large-v2 模型已准备就绪，必要时自动下载。"""
+
+    target_root = (models_dir / "faster-whisper" / "large-v2").resolve()
+    model_files = list(target_root.glob("*.bin")) if target_root.exists() else []
+    should_download = args.download or not model_files
+    if should_download:
+        print("[INFO] 正在检查并准备模型缓存…")
+        token = args.hf_token or os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HF_TOKEN")
+        invoke_downloader(models_dir, token)
+    return target_root
+
+
 def print_token_hint() -> None:
     """输出当前 Hugging Face Token 状态并进行遮蔽。"""  # 函数说明。
 
@@ -179,8 +203,8 @@ def main() -> int:
             sys.stdout = tee_stream  # 将标准输出指向 tee。
         print("=== Whisper large-v2 中文转写自动流程 ===")  # 输出标题。
         print_token_hint()  # 输出 token 状态。
-        if args.download:  # 若需要提前下载模型。
-            invoke_downloader(models_dir, args.hf_token or os.getenv("HUGGINGFACE_HUB_TOKEN") or os.getenv("HF_TOKEN"))  # 调用下载脚本。
+        model_root = ensure_model_cache(models_dir, args)
+        print(f"[INFO] 模型缓存目录: {model_root}")
         audio_files = discover_audio_files(input_path)  # 扫描音频文件。
         if not audio_files:  # 若列表为空。
             print("⚠️ 未在输入路径下找到音频文件。支持扩展: " + ", ".join(sorted(AUDIO_EXTENSIONS)))  # 提示用户。
