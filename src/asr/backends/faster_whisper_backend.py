@@ -120,11 +120,48 @@ class FasterWhisperTranscriber(ITranscriber):
                 compute_type=compute_type,
             )
         except Exception as exc:  # noqa: BLE001
-            # 提供友好的错误提示，提醒用户重新下载或调整 compute_type/device。
-            raise FasterWhisperBackendError(
-                "无法加载 faster-whisper 模型，请确认路径存在且 compute_type/device 组合受支持。"
-                " 如有需要，可重新执行 scripts/download_model.py --force"
-            ) from exc
+            # 如果 GPU 初始化失败，尝试自动回退到 CPU/INT8 组合，兼容无 CUDA 环境。
+            fallback_device = None
+            fallback_compute_type = None
+            if device != "cpu":
+                fallback_device = "cpu"
+            if compute_type in {"auto", "float16", "float32", "int8_float16", "int8_float32"}:
+                fallback_compute_type = "int8"
+            # 若需要回退则记录日志并重试。
+            if fallback_device or fallback_compute_type:
+                LOGGER.warning(
+                    "FasterWhisper 模型加载失败（device=%s compute_type=%s）：%s，尝试回退到 device=%s compute_type=%s",
+                    device,
+                    compute_type,
+                    exc,
+                    fallback_device or device,
+                    fallback_compute_type or compute_type,
+                )
+                try:
+                    self._model = WhisperModel(
+                        resolved_model,
+                        device=fallback_device or device,
+                        compute_type=fallback_compute_type or compute_type,
+                    )
+                except Exception as fallback_exc:  # noqa: BLE001
+                    raise FasterWhisperBackendError(
+                        "无法加载 faster-whisper 模型，请确认路径存在且 compute_type/device 组合受支持。"
+                        " 如有需要，可重新执行 scripts/download_model.py --force"
+                    ) from fallback_exc
+                else:
+                    self.device = fallback_device or device
+                    self.compute_type = fallback_compute_type or compute_type
+                    self.extra_options.update(
+                        {
+                            "device": self.device,
+                            "compute_type": self.compute_type,
+                        }
+                    )
+            else:
+                raise FasterWhisperBackendError(
+                    "无法加载 faster-whisper 模型，请确认路径存在且 compute_type/device 组合受支持。"
+                    " 如有需要，可重新执行 scripts/download_model.py --force"
+                ) from exc
         # 记录实际使用的模型标识（可能是绝对路径或模型名）。
         self.model_path_or_name = str(resolved_model)
         # 在详细日志模式下给出性能调优建议，帮助用户选择合适的 compute_type。
