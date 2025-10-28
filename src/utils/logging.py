@@ -113,7 +113,28 @@ class _LoggerCore:
             if descriptor:  # 若找到了描述则写入。
                 parts.append(f"task={descriptor}")  # 添加任务标识。
         parts.append(record["msg"])  # 最后追加原始消息文本。
-        return " ".join(parts)  # 使用空格拼接所有片段生成最终字符串。
+        base = " ".join(parts)  # 使用空格拼接所有片段生成基础行。
+
+        # 若存在错误字段，则在基础行后追加详细信息，便于快速定位问题。
+        extra_lines: list[str] = []
+        error_fields: list[str] = []
+        error_type = record.get("error_type") or record.get("errorType")
+        if error_type:
+            error_fields.append(f"error_type={error_type}")
+        error_message = record.get("error")
+        if error_message:
+            error_fields.append(f"error={error_message}")
+        if error_fields:
+            extra_lines.append("    " + " ".join(error_fields))
+
+        trace_text = record.get("trace")
+        if isinstance(trace_text, str) and trace_text.strip():
+            for line in trace_text.rstrip().splitlines():
+                extra_lines.append("    " + line)
+
+        if extra_lines:
+            return "\n".join([base, *extra_lines])
+        return base  # 当无额外字段时返回单行日志。
 
     def _render_json(self, record: Dict[str, Any]) -> Dict[str, Any]:
         """在 JSONL 模式下直接返回字典，便于后续序列化。"""  # 方法说明。

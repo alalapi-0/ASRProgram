@@ -98,3 +98,26 @@ def test_logging_sampling_respects_rate(tmp_path: Path) -> None:
     assert len(info_logs) < 50  # 采样应减少信息级日志数量。
     assert len(info_logs) > 0  # 仍应保留部分信息级日志。
     assert len(error_logs) == 5  # 错误日志不应被采样。
+
+
+def test_human_logger_exception_includes_trace(tmp_path: Path) -> None:
+    """human 格式在记录异常时应包含错误类型、消息及堆栈。"""  # 测试说明。
+
+    log_path = tmp_path / "human.log"  # 构造日志文件路径。
+    logger = get_logger(  # 创建 human 格式日志器并仅写入文件。
+        format="human",
+        level="INFO",
+        log_file=str(log_path),
+        quiet=True,
+    )
+    try:
+        raise RuntimeError("boom")  # 制造异常触发 exception 日志。
+    except RuntimeError:
+        logger.exception("transcription failed")
+
+    contents = log_path.read_text(encoding="utf-8").splitlines()  # 读取日志文件。
+    assert contents, "expected log file to contain exception output"
+    # 第一行应为基础行，随后至少包含错误字段与堆栈信息。
+    assert any("error_type=RuntimeError" in line for line in contents[1:])
+    assert any("error=boom" in line for line in contents[1:])
+    assert any("RuntimeError: boom" in line for line in contents[1:])
