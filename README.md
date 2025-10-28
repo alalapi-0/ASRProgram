@@ -64,10 +64,12 @@ python scripts/verify_env.py --backend faster-whisper --model base
 python -m src.cli.main \
   --input ./samples \
   --backend faster-whisper \
-  --profile cpu-fast \
+  --profile ubuntu-cpu-quality \
   --segments-json true \
   --verbose
 ```
+
+> Linux/Ubuntu 环境下若未显式指定 `--profile`，CLI 会自动套用 `ubuntu-cpu-quality`，以 large-v2 + CPU/int8 组合优先保证词级质量。
 
 <!-- Purpose: Highlight expected outputs heading -->
 ### 4. 输出结果 / Output Artifacts
@@ -81,7 +83,7 @@ python -m src.cli.main \
 <!-- Purpose: Provide concise summary bullets -->
 - 模型固定为 `faster-whisper/large-v2`，语言固定中文（`zh`），默认输出段级与词级时间轴。
 - 使用 Hugging Face Hub 自动断点续传下载，缓存目录默认为 `~/.cache/asrprogram/models/faster-whisper/large-v2`。
-- 新增 `tools/asr_quickstart.py` 提供零交互主入口，搭配 `--no-prompt` 可一键执行。
+- 新增 `tools/asr_quickstart.py` 提供零交互主入口，搭配 `--no-prompt` 可一键执行；在 Linux/Ubuntu 上会自动启用 `ubuntu-cpu-quality` profile（CPU + int8 + large-v2）。
 - 支持 `--tee-log` 双通道日志，远程终端亦可实时查看输出。
 
 <!-- Purpose: Document one-click scripts -->
@@ -126,13 +128,15 @@ python -m src.cli.main \
    huggingface-cli login --token hf_xxx
    ```
 
+> `scripts/setup.sh` 会在 Ubuntu VPS 中检测缺失的 `ffmpeg` 并尝试通过 `apt-get` 自动安装，若安装失败请手动执行 `sudo apt-get install ffmpeg`。
+
 <!-- Purpose: Provide python API sample heading -->
 ### 5. Python API 示例 / Python API Usage
 <!-- Purpose: Show how to use library programmatically -->
 ```python
 from src.pipeline.runner import TranscriptionRunner  # 加载核心流水线
 
-runner = TranscriptionRunner.from_profile("cpu-fast")  # 使用预设 profile
+runner = TranscriptionRunner.from_profile("ubuntu-cpu-quality")  # 使用针对 Ubuntu 的高质量 CPU profile
 result = runner.run_file("./samples/demo.wav", segments_json=True)  # 执行单文件转写
 print(result.words[0])  # 打印首个词条的时间戳与置信度
 ```
@@ -166,6 +170,7 @@ ASRProgram 采用“YAML 默认 + 用户覆盖 + 环境变量 + CLI”四层配�
 | `cpu-fast` | <!-- Purpose: cpu-fast description -->低算力快速转写，启用动态分段和轻量模型。 | <!-- Purpose: cpu-fast use case -->本地开发、CI 验证 |
 | `gpu-accurate` | <!-- Purpose: gpu-accurate description -->利用 GPU 模型提升准确率与并行度。 | <!-- Purpose: gpu-accurate use case -->云端批量转写、长音频 |
 | `whispercpp-lite` | <!-- Purpose: whispercpp-lite description -->基于 whisper.cpp 的纯 CPU 极简模式。 | <!-- Purpose: whispercpp-lite use case -->资源受限的边缘节点 |
+| `ubuntu-cpu-quality` | <!-- Purpose: ubuntu profile description -->large-v2 + CPU/int8，附带段/词级 JSON。 | <!-- Purpose: ubuntu profile use case -->无 GPU 的 Ubuntu VPS、高质量词级转写 |
 
 <!-- Purpose: Provide configuration file reference -->
 > 所有 Profile 定义位于 `config/profiles/`，可复制后调整推理参数与后端配置。

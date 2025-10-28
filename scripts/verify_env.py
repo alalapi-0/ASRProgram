@@ -28,6 +28,7 @@ FASTER_WHISPER_SIZE_HINT = {  # 不同规格模型的预估总大小（字节）
     "base": 130 * 1024 * 1024,  # 约 130MB。
     "small": 430 * 1024 * 1024,  # 约 430MB。
     "medium": 1_400 * 1024 * 1024,  # 约 1.4GB。
+    "large-v2": 2_950 * 1024 * 1024,  # 约 2.9GB。
     "large-v3": 3_000 * 1024 * 1024,  # 约 3GB。
 }  # 大小参考结束。
 WHISPER_CPP_SIZE_HINT = {  # whisper.cpp 常见模型的体积预估。

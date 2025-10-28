@@ -5,6 +5,7 @@ from __future__ import annotations  # 启用前向注解以增强类型提示兼
 import argparse  # 导入 argparse 用于处理命令行参数。
 import importlib.util  # 导入 importlib.util 以检测依赖是否已安装。
 import os  # 导入 os 以管理环境变量与路径。
+import platform  # 导入 platform 以根据系统自动选择默认配置。
 import subprocess  # 导入 subprocess 以调用项目 CLI。
 import sys  # 导入 sys 以访问解释器路径与标准流。
 from pathlib import Path  # 导入 Path 以进行路径拼接与遍历。
@@ -23,6 +24,7 @@ DEFAULT_OUTPUT = (SCRIPT_ROOT / "out").resolve()  # 默认输出目录。
 DEFAULT_MODELS_DIR = Path(os.path.expanduser("~/.cache/asrprogram/models")).resolve()  # 默认模型缓存路径。
 DOWNLOAD_SCRIPT = SCRIPT_ROOT / "scripts" / "download_model.py"  # 下载脚本路径。
 REQUIREMENTS_FILE = SCRIPT_ROOT / "requirements.txt"  # 依赖清单路径。
+IS_LINUX = platform.system().lower() == "linux"  # 记录是否处于 Linux (含 Ubuntu) 环境。
 
 
 class TeeStream:
@@ -155,12 +157,18 @@ def build_cli_command(audio_path: Path, out_dir: Path, models_dir: Path, args: a
         str(max(1, args.num_workers)),  # 传递 worker 数，至少为 1。
         "--verbose",  # 启用详细日志，便于排查。
     ]
+    if IS_LINUX:  # 在 Linux VPS 上自动应用高质量 CPU profile。
+        command.extend(["--profile", "ubuntu-cpu-quality"])
     model_root = (models_dir / "faster-whisper" / "large-v2").resolve()  # 解析固定模型的缓存目录。
     command.extend(["--set", f"runtime.model={model_root}"])  # 指定模型路径确保使用缓存。
     if args.device:  # 若用户指定设备。
         command.extend(["--set", f"runtime.device={args.device}"])  # 将设备参数传递给 CLI。
+    elif IS_LINUX:  # 默认在 Linux 上锁定 CPU，避免误用不可用的 GPU。
+        command.extend(["--set", "runtime.device=cpu"])
     if args.compute_type:  # 若用户指定精度。
         command.extend(["--set", f"runtime.compute_type={args.compute_type}"])  # 将精度参数传递给 CLI。
+    elif IS_LINUX:  # 默认采用 int8 精度以降低 large-v2 的内存压力。
+        command.extend(["--set", "runtime.compute_type=int8"])
     if args.tee_log:  # 若启用 tee 日志。
         command.extend(["--tee-log", str(Path(args.tee_log).expanduser().resolve())])  # 传递给主 CLI 以同步日志文件。
     return command  # 返回命令列表。

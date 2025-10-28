@@ -1126,12 +1126,12 @@ def _run_impl(
                 sys.stdout.flush()  # 每处理完一个任务刷新 stdout，确保远程终端即时显示。
             except Exception:  # noqa: BLE001
                 pass  # 某些环境可能不支持 flush，安全忽略。
-                reason = item.skipped_reason or "skipped"
-                if item.stale:
-                    skipped_stale += 1
-                if reason == "lock-timeout":
-                    lock_conflicts += 1
-                skipped_items.append({"input": str(tasks[index].input_path), "reason": reason})
+            reason = item.skipped_reason or "skipped"
+            if item.stale:
+                skipped_stale += 1
+            if reason == "lock-timeout":
+                lock_conflicts += 1
+            skipped_items.append({"input": str(tasks[index].input_path), "reason": reason})
         elif isinstance(item, Exception):
             processed += 1
             failed += 1

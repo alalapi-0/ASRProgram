@@ -24,6 +24,16 @@ WHISPERCPP_DIR=""  # whisper.cpp 缓存与安装目录，后续根据 cache-dir 
 WHISPERCPP_EXE=""  # 用户已存在的 whisper.cpp 可执行文件路径。
 WHISPERCPP_RESOLVED_EXE=""  # 实际使用的 whisper.cpp 可执行文件路径。
 WHISPERCPP_MODEL_PATH=""  # 下载后的 whisper.cpp 模型文件路径，供 verify 使用。
+
+detect_linux_distro() {  # 检测 Linux 发行版以便按需执行 apt 指令。
+  if [[ -r /etc/os-release ]]; then  # 若存在标准 os-release 文件。
+    # shellcheck disable=SC1091  # 运行时读取该文件提供的变量。
+    . /etc/os-release
+    echo "${ID:-}"  # 返回发行版 ID（如 ubuntu/debian）。
+    return 0
+  fi
+  echo ""  # 非 Linux 或缺少文件时返回空串。
+}
 print_help() {  # 定义帮助函数输出脚本参数说明。
   cat <<'USAGE'  # 使用 here-doc 打印多行帮助信息。
 用法：bash scripts/setup.sh [参数]
@@ -107,6 +117,8 @@ while [[ $# -gt 0 ]]; do  # 开始解析命令行参数。
       ;;
   esac  # 结束 case 结构。
 done  # 完成所有参数解析。
+UNAME_STR=$(uname -s 2>/dev/null || echo "unknown")  # 记录操作系统名称。
+LINUX_DISTRO=$(detect_linux_distro)  # 检测发行版 ID（若可用）。
 if [[ -z "${WHISPERCPP_DIR}" ]]; then  # 若未指定 whisper.cpp 目录。
   WHISPERCPP_DIR="${CACHE_DIR}/whispercpp"  # 默认放置在 cache-dir 下的 whispercpp。
 fi  # 完成目录推导。
@@ -145,7 +157,10 @@ print_parameters() {  # 定义函数打印解析后的参数信息。
 }  # 结束打印函数。
 print_system_info() {  # 定义函数输出当前平台信息。
   echo "---- 系统信息 ----"  # 打印标题。
-  uname -s 2>/dev/null || echo "[INFO] uname -s 不可用"  # 打印操作系统类型。
+  echo "内核类型          : ${UNAME_STR}"  # 打印操作系统类型。
+  if [[ -n "${LINUX_DISTRO}" ]]; then  # 若检测到 Linux 发行版。
+    echo "Linux 发行版      : ${LINUX_DISTRO}"  # 输出发行版信息。
+  fi
   uname -m 2>/dev/null || echo "[INFO] uname -m 不可用"  # 打印 CPU 架构。
   echo "Python (默认) 版本: $(python --version 2>/dev/null || echo 未检测到)"  # 显示默认 python 版本。
   echo "pip (默认) 版本   : $(pip --version 2>/dev/null || echo 未检测到)"  # 显示默认 pip 版本。
@@ -157,6 +172,40 @@ ensure_directory() {  # 定义函数用于创建目录。
     mkdir -p "${target_dir}"  # 若不存在则创建目录。
   fi  # 目录存在时无需额外操作。
 }  # 结束目录创建函数。
+
+maybe_install_ffmpeg() {  # 针对 Ubuntu 环境自动尝试安装 ffmpeg。
+  if [[ "${CHECK_ONLY}" == "true" ]]; then  # 仅检查模式不执行安装。
+    return
+  fi
+  if [[ "${USE_SYSTEM_FFMPEG}" != "true" ]]; then  # 用户禁止使用系统 ffmpeg 时跳过。
+    return
+  fi
+  if [[ "${UNAME_STR}" != "Linux" ]]; then  # 仅在 Linux 平台尝试。
+    return
+  fi
+  if [[ "${LINUX_DISTRO}" != "ubuntu" ]]; then  # 限定 Ubuntu，避免误用其他发行版的包管理器。
+    return
+  fi
+  if command -v ffmpeg >/dev/null 2>&1; then  # 已安装 ffmpeg 时无需操作。
+    return
+  fi
+  if ! command -v apt-get >/dev/null 2>&1; then  # 未检测到 apt-get。
+    echo "[WARN] 未检测到 apt-get，无法自动安装 ffmpeg。请手动执行 sudo apt-get install ffmpeg。"
+    return
+  fi
+  echo "[INFO] Ubuntu 环境缺少 ffmpeg，尝试通过 apt-get 安装…"
+  local update_cmd=(apt-get update)
+  local install_cmd=(apt-get install -y ffmpeg)
+  if command -v sudo >/dev/null 2>&1; then  # 如存在 sudo 则优先使用。
+    update_cmd=(sudo "${update_cmd[@]}")
+    install_cmd=(sudo "${install_cmd[@]}")
+  fi
+  if "${update_cmd[@]}" && "${install_cmd[@]}"; then
+    echo "[OK] 已使用 apt-get 成功安装 ffmpeg。"
+  else
+    echo "[WARN] 自动安装 ffmpeg 失败，请手动执行: sudo apt-get install ffmpeg"
+  fi
+}
 run_verify() {  # 定义函数执行环境体检脚本。
   local python_exec="$1"  # 接收用于运行体检的 Python 解释器。
   local verify_args=(  # 构造体检脚本的基础参数数组。
@@ -570,6 +619,7 @@ PYBLOCK
 main() {  # 定义主流程函数。
   print_parameters  # 打印用户输入。
   print_system_info  # 输出系统信息。
+  maybe_install_ffmpeg  # 在 Ubuntu 环境缺少 ffmpeg 时尝试自动安装。
   local python_exec="$(resolve_python)"  # 调用函数确定 Python 解释器。
   RESOLVED_PYTHON="${python_exec}"  # 将解析结果记录为全局变量以供后续使用。
   if [[ -z "${python_exec}" ]]; then  # 如果未能解析到 Python。
