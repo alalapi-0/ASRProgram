@@ -55,7 +55,7 @@ runtime:  # 运行时核心配置，供后端实例化使用。
 backend:  # 后端下载相关默认值集合。
   default: faster-whisper  # 推荐的真实后端。
 model:  # 模型相关默认设置。
-  default: medium  # 默认模型规格，可根据硬件调整。
+  default: large-v2  # 默认模型规格，优先保证词级转写质量。
 cache_dir: .cache/  # 仓库内缓存目录。
 models_dir: ~/.cache/asrprogram/models/  # 用户级模型缓存目录。
 download:  # 下载通用配置。
@@ -91,3 +91,11 @@ profiles:  # 预设 Profile 列表，可在 CLI 通过 --profile 选择。
       device: "auto"  # 自动检测最优设备。
       compute_type: "int8_float16"  # 混合精度权衡速度与质量。
       beam_size: 3  # 适中 beam。
+  ubuntu-cpu-quality:  # 面向 Ubuntu VPS 的高质量 CPU 配置。
+    runtime:
+      backend: "faster-whisper"  # 使用 faster-whisper 获取词级时间戳。
+      device: "cpu"  # 固定在 CPU 上运行，兼容无 GPU 的远端实例。
+      compute_type: "int8"  # 使用 int8 推理以降低 large-v2 的内存占用。
+      model: "large-v2"  # 默认加载 large-v2 提升词级 JSON 质量。
+      segments_json: true  # 始终生成段级 JSON，便于质量追踪。
+      beam_size: 5  # 维持较大的 beam 以保障准确率。

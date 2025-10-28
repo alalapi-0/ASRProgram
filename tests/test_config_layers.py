@@ -80,6 +80,18 @@ def test_profile_application_and_override(tmp_path: Path) -> None:
     assert bundle.config["meta"]["profile"] == "cpu-fast"  # meta 中记录生效的 profile 名称。
 
 
+def test_ubuntu_cpu_quality_profile_defaults() -> None:
+    """ubuntu-cpu-quality profile 应锁定 large-v2 CPU 推理。"""
+
+    bundle = load_and_merge_config(profile_name="ubuntu-cpu-quality")
+    runtime = bundle.config["runtime"]
+    assert runtime["device"] == "cpu"
+    assert runtime["compute_type"] == "int8"
+    assert runtime["model"] == "large-v2"
+    assert runtime["segments_json"] is True
+    assert bundle.config["meta"]["profile"] == "ubuntu-cpu-quality"
+
+
 def test_env_file_support(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """验证同目录 .env 会被解析并应用。"""  # 测试说明。
     config_dir = tmp_path / "cfg"  # 创建配置目录。

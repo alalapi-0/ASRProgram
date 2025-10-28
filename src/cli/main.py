@@ -3,6 +3,7 @@ import os
 import argparse  # 导入 argparse 以解析命令行参数。
 import logging
 import sys  # 导入 sys 以支持通过 python -m 调用。
+import platform  # 导入 platform 以按需选择默认 profile。
 from pathlib import Path  # 导入 Path 以构造清单默认路径。
 
 os.environ.setdefault("PYTHONUNBUFFERED", "1")
@@ -21,6 +22,7 @@ from src.utils.config import (  # 导入配置工具以支持分层加载与快�
 from src.utils.logging import get_logger  # 导入日志工具创建结构化日志器。
 
 ALLOWED_BACKENDS = {"dummy", "faster-whisper", "whisper.cpp"}  # 支持的后端列表。
+DEFAULT_LINUX_PROFILE = "ubuntu-cpu-quality"  # Linux 平台默认启用的 profile 名称。
 
 
 def parse_bool(value: str) -> bool:
@@ -317,11 +319,15 @@ def main(argv: list[str] | None = None) -> int:
         )  # 输出错误信息。
     cli_overrides = _build_cli_overrides(args)  # 根据 CLI 构造覆盖层。
     cli_set_overrides = parse_cli_set_items(args.set_items) if args.set_items else {}  # 解析 --set 列表。
+    profile_name = args.profile_name  # 记录用户显式指定的 profile。
+    if profile_name is None and platform.system().lower() == "linux":  # 在 Linux 上优先使用 Ubuntu 专属配置。
+        profile_name = DEFAULT_LINUX_PROFILE
+        cli_logger.debug("auto profile selected", profile=profile_name)
     bundle = load_and_merge_config(
         cli_overrides=cli_overrides,
         cli_set_overrides=cli_set_overrides,
         config_path=args.config,
-        profile_name=args.profile_name,
+        profile_name=profile_name,
     )  # 执行分层配置加载。
     config = bundle.config  # 读取最终配置字典。
     if args.print_config:  # 若用户请求打印配置。
