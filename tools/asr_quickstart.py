@@ -3,6 +3,7 @@
 from __future__ import annotations  # 启用前向注解以增强类型提示兼容性。
 
 import argparse  # 导入 argparse 用于处理命令行参数。
+import importlib.util  # 导入 importlib.util 以检测依赖是否已安装。
 import os  # 导入 os 以管理环境变量与路径。
 import subprocess  # 导入 subprocess 以调用项目 CLI。
 import sys  # 导入 sys 以访问解释器路径与标准流。
@@ -21,6 +22,7 @@ DEFAULT_INPUT = (SCRIPT_ROOT / "Audio").resolve()  # 默认输入目录。
 DEFAULT_OUTPUT = (SCRIPT_ROOT / "out").resolve()  # 默认输出目录。
 DEFAULT_MODELS_DIR = Path(os.path.expanduser("~/.cache/asrprogram/models")).resolve()  # 默认模型缓存路径。
 DOWNLOAD_SCRIPT = SCRIPT_ROOT / "scripts" / "download_model.py"  # 下载脚本路径。
+REQUIREMENTS_FILE = SCRIPT_ROOT / "requirements.txt"  # 依赖清单路径。
 
 
 class TeeStream:
@@ -104,6 +106,30 @@ def run_subprocess(command: List[str]) -> int:
 
     print("$ " + " ".join(command))  # 打印命令方便调试。
     return subprocess.call(command)  # 调用命令并返回退出状态。
+
+
+def ensure_python_dependencies() -> None:
+    """确保 faster-whisper 依赖已经安装，必要时自动安装。"""
+
+    if importlib.util.find_spec("faster_whisper") is not None:
+        return
+    if not REQUIREMENTS_FILE.exists():
+        raise FileNotFoundError(f"缺少依赖清单: {REQUIREMENTS_FILE}")
+    print("[INFO] 未检测到 faster-whisper，正在自动安装依赖…")
+    exit_code = run_subprocess(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "-r",
+            str(REQUIREMENTS_FILE),
+        ]
+    )
+    if exit_code != 0:
+        raise RuntimeError("自动安装依赖失败，请手动执行 pip install -r requirements.txt")
+    if importlib.util.find_spec("faster_whisper") is None:
+        raise RuntimeError("依赖安装后仍无法导入 faster-whisper，请检查当前 Python 环境")
 
 
 def build_cli_command(audio_path: Path, out_dir: Path, models_dir: Path, args: argparse.Namespace) -> List[str]:
@@ -197,6 +223,7 @@ def main() -> int:
         models_dir = prompt_value(args.models_dir, DEFAULT_MODELS_DIR, "请输入模型缓存目录", args.no_prompt)  # 获取模型目录。
         output_dir.mkdir(parents=True, exist_ok=True)  # 确保输出目录存在。
         models_dir.mkdir(parents=True, exist_ok=True)  # 确保模型目录存在。
+        ensure_python_dependencies()  # 先确保所需 Python 依赖已就绪。
         if args.tee_log:  # 若指定日志文件。
             tee_path = Path(args.tee_log).expanduser().resolve()  # 解析日志路径。
             tee_stream = TeeStream(sys.stdout, tee_path)  # 创建 tee 流。
