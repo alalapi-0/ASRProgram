@@ -204,6 +204,7 @@ def _normalize_config(config: Dict[str, Any]) -> None:
         ["runtime", "whisper_cpp", "executable_path"],
         ["runtime", "whisper_cpp", "model_path"],
     ]  # 关键路径字段列表。
+    lowercase_path_keys = {("input",), ("out_dir",)}  # 需要额外执行小写化的路径键集合。
     for path in path_like_keys:  # 遍历每个路径键。
         parent = config  # 从根节点开始。
         for part in path[:-1]:  # 定位到父级字典。
@@ -217,7 +218,10 @@ def _normalize_config(config: Dict[str, Any]) -> None:
         leaf = path[-1]  # 末级键名。
         value = parent.get(leaf)  # 读取当前值。
         if isinstance(value, str) and value.strip():  # 对非空字符串进行规范化。
-            parent[leaf] = _normalize_path(value)  # 写回处理后的路径。
+            normalized = _normalize_path(value)  # 先执行通用规范化。
+            if tuple(path) in lowercase_path_keys:  # 针对输入/输出目录强制转为小写。
+                normalized = normalized.lower()
+            parent[leaf] = normalized  # 写回处理后的路径。
     log_sample = config.get("log_sample_rate")  # 读取日志采样率。
     if isinstance(log_sample, (int, float)):  # 若为数字类型则执行截断。
         config["log_sample_rate"] = max(min(float(log_sample), 1.0), 1e-6)  # 限制在 (0,1] 范围。
