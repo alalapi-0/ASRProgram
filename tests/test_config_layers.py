@@ -53,8 +53,8 @@ out_dir: ./custom
     assert bundle.config["out_dir"] == "./custom"  # 用户配置覆盖默认 out_dir。
 
 
-def test_input_output_paths_forced_lowercase(tmp_path: Path) -> None:
-    """输入与输出目录在规范化后应当被强制转为小写。"""  # 测试说明。
+def test_input_output_paths_preserve_case(tmp_path: Path) -> None:
+    """输入与输出目录在规范化后应当保留大小写信息。"""  # 测试说明。
     user_cfg = tmp_path / "paths.yaml"  # 用户配置路径。
     _write_yaml(
         user_cfg,
@@ -63,8 +63,8 @@ out_dir: ./OutputDir
 """,
     )  # 写入包含大写字母的目录路径。
     bundle = load_and_merge_config(config_path=str(user_cfg))  # 加载配置执行规范化。
-    assert bundle.config["input"] == "./samples"  # 输入路径被转换为小写。
-    assert bundle.config["out_dir"] == "./outputdir"  # 输出目录同样被转换为小写。
+    assert bundle.config["input"] == "./SampleS"  # 输入路径保留大小写。
+    assert bundle.config["out_dir"] == "./OutputDir"  # 输出目录同样保留大小写。
 
 
 def test_profile_application_and_override(tmp_path: Path) -> None:
